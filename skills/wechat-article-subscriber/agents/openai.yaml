@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeChat Article Subscriber"
+  short_description: "Evaluate a supplied WeChat article link"
+  default_prompt: "Use $wechat-article-subscriber to fetch, review, score, and optionally sync the WeChat article link I provide. Do not discover accounts or request WeChat Cookie/token."
