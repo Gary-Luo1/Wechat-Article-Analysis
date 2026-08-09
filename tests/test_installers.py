@@ -226,7 +226,7 @@ def test_powershell_installer_accepts_py_launcher(tmp_path: Path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher test")
-def test_unix_wrapper_prefers_python3(tmp_path: Path):
+def test_unix_wrapper_uses_a_python_with_article_dependencies(tmp_path: Path):
     bash = shutil.which("bash")
     if not bash:
         pytest.skip("bash is unavailable")
@@ -259,6 +259,45 @@ def test_unix_wrapper_prefers_python3(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     calls = log.read_text(encoding="utf-8")
     assert "-c import sys" in calls
+    assert "runtime.py process --help" in calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher test")
+def test_unix_wrapper_skips_python3_without_article_dependencies(tmp_path: Path):
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is unavailable")
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    log = tmp_path / "calls.log"
+    for name, dependency_exit in (("python3", 1), ("python", 0)):
+        executable = commands / name
+        executable.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s %s\\n' '{name}' \"$*\" >> {shlex_quote(str(log))}\n"
+            "if [ \"${1:-}\" = \"-c\" ] && [[ \"${2:-}\" == *\"import bs4, requests\"* ]]; then exit "
+            f"{dependency_exit}; fi\n"
+            "if [ \"${1:-}\" = \"-c\" ]; then exit 0; fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{commands}{os.pathsep}{environment.get('PATH', '')}"
+    result = subprocess.run(
+        [bash, str(ROOT / "skills" / SKILL_NAME / "scripts" / "run.sh"), "process", "--help"],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8")
+    assert "python3 -c import bs4, requests" in calls
+    assert "python " in calls
     assert "runtime.py process --help" in calls
 
 

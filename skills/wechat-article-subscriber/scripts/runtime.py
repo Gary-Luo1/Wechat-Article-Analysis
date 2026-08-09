@@ -24,8 +24,6 @@ def _venv_python() -> Path:
 
 
 def _system_runtime_is_ready(command: str) -> bool:
-    if command in {"manage", "lark", "process"}:
-        return True
     try:
         __import__("requests")
         __import__("bs4")

@@ -9,10 +9,14 @@ $env:PYTHONUTF8 = "1"
 $scriptRoot = Split-Path -Parent $PSCommandPath
 
 $candidates = @()
-$python = Get-Command python -ErrorAction SilentlyContinue
-if ($python) { $candidates += [pscustomobject]@{ Source = $python.Source; Prefix = @() } }
-$launcher = Get-Command py -ErrorAction SilentlyContinue
-if ($launcher) { $candidates += [pscustomobject]@{ Source = $launcher.Source; Prefix = @("-3") } }
+if ($env:WECHAT_ARTICLE_PYTHON) {
+    $candidates += [pscustomobject]@{ Source = $env:WECHAT_ARTICLE_PYTHON; Prefix = @() }
+} else {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) { $candidates += [pscustomobject]@{ Source = $python.Source; Prefix = @() } }
+    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    if ($launcher) { $candidates += [pscustomobject]@{ Source = $launcher.Source; Prefix = @("-3") } }
+}
 
 foreach ($candidate in $candidates) {
     $versionText = & $candidate.Source @($candidate.Prefix) -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
@@ -22,8 +26,10 @@ foreach ($candidate in $candidates) {
     } catch {
         continue
     }
+    & $candidate.Source @($candidate.Prefix) -c "import bs4, requests" 2>$null
+    if ($LASTEXITCODE -ne 0) { continue }
     & $candidate.Source @($candidate.Prefix) (Join-Path $scriptRoot "runtime.py") @CommandArgs
     exit $LASTEXITCODE
 }
 
-throw "Python 3.9+ is required (supported launchers: python or py -3)"
+throw "Python 3.9+ with requests and beautifulsoup4 is required; run the installer or set WECHAT_ARTICLE_PYTHON"
