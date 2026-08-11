@@ -45,3 +45,18 @@ def test_runtime_rejects_system_python_without_article_dependencies(monkeypatch)
 
     monkeypatch.setattr(builtins, "__import__", block_bs4)
     assert runtime._system_runtime_is_ready("process") is False
+
+
+def test_runtime_rejects_system_python_without_chrome_impersonation(monkeypatch):
+    import builtins
+    import runtime
+
+    original_import = builtins.__import__
+
+    def block_curl_cffi(name, *args, **kwargs):
+        if name == "curl_cffi":
+            raise ModuleNotFoundError("curl_cffi is unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_curl_cffi)
+    assert runtime._system_runtime_is_ready("process") is False

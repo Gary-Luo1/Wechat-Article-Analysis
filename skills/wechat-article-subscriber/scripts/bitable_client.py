@@ -361,7 +361,7 @@ def _run_lark(
     args: list[str], *, retries: int = 3
 ) -> dict[str, Any] | list[Any]:
     try:
-        safe_args = safe_lark_arguments(args)
+        safe_args = safe_lark_arguments(args, allow_managed_writes=True)
     except ValueError as exc:
         raise LarkCLIError(str(exc), kind="config") from exc
     command = [_lark_cli(), *safe_args]
@@ -613,7 +613,7 @@ def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[s
         "score": float(metadata["score"]),
         "rationale": str(metadata.get("rationale", ""))[:2000],
         "tags": [str(tag) for tag in tags],
-        "read_status": "未读",
+        "read_status": "已读",
     }
 
 
@@ -929,58 +929,6 @@ def verify_feishu_identity(
         "app_id": expected_app_id,
         "status": "ready",
     }
-
-
-RESOURCE_TYPES = {
-    "bitable",
-    "doc",
-    "docx",
-    "file",
-    "folder",
-    "sheet",
-    "slides",
-    "wiki",
-}
-
-
-def grant_bot_created_resource(
-    token: str, resource_type: str, manager_open_id: str
-) -> dict[str, Any]:
-    """Grant full access to the human manager of a bot-created resource."""
-    resource_token = token.strip()
-    member = manager_open_id.strip()
-    normalized_type = resource_type.strip().casefold()
-    if not resource_token:
-        raise ValueError("resource token is required")
-    if normalized_type not in RESOURCE_TYPES:
-        raise ValueError(
-            f"unsupported Feishu resource type: {resource_type}; "
-            f"choose one of {sorted(RESOURCE_TYPES)}"
-        )
-    if not member.startswith("ou_"):
-        raise ValueError("manager_open_id must be a confirmed Feishu open_id starting with ou_")
-    return _run_lark(
-        [
-            "drive",
-            "+member-add",
-            "--token",
-            resource_token,
-            "--type",
-            normalized_type,
-            "--member-id",
-            member,
-            "--member-type",
-            "openid",
-            "--perm",
-            "full_access",
-            "--as",
-            "bot",
-            "--yes",
-            "--format",
-            "json",
-        ],
-        retries=1,
-    )
 
 
 def create_standard_base(

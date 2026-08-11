@@ -151,7 +151,9 @@ def profile_name_for_app(app_id: str) -> str:
     return f"wechat-article-{digest}"
 
 
-def safe_lark_arguments(arguments: list[str]) -> list[str]:
+def safe_lark_arguments(
+    arguments: list[str], *, allow_managed_writes: bool = False
+) -> list[str]:
     """Pin operations to the Skill profile and reject profile-destructive calls."""
     args = list(arguments)
     if not args:
@@ -164,6 +166,12 @@ def safe_lark_arguments(arguments: list[str]) -> list[str]:
     binding = _runtime_binding()
     command = args[0]
     subcommand = args[1] if len(args) > 1 else ""
+
+    if not allow_managed_writes and command not in {"profile", "config", "auth"}:
+        raise ValueError(
+            "direct Feishu data operations are blocked; use the managed process/manage "
+            "commands so identity, target, and permission checks cannot be bypassed"
+        )
 
     if command == "profile":
         if subcommand != "list":

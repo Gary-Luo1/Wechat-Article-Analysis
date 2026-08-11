@@ -14,6 +14,9 @@ FEISHU_APPROVAL_SCOPE_FIELDS = (
     "expected_user_open_id",
     "cli_profile",
     "manager_open_id",
+    "manager_access",
+    "manager_access_base_name",
+    "manager_access_table_name",
     "base_token",
     "table_id",
     "schema_policy",
@@ -105,6 +108,12 @@ def next_stage(
     destination = config["feishu"]["destination"]
     if destination == "undecided":
         return "feishu_destination_unconfirmed", "ask_user_for_feishu_destination"
+    if (
+        destination == "create"
+        and config["setup"]["feishu_identity_confirmed"]
+        and config["feishu"]["identity"] == "bot"
+    ):
+        return "feishu_create_requires_user_identity", "switch_to_user_identity"
     policy = policy_for(config)
     if not policy["confirmed"]:
         return "execution_policy_unconfirmed", "review_and_confirm_execution_policy"
@@ -127,6 +136,12 @@ def next_stage(
         and not config["feishu"]["manager_open_id"]
     ):
         return "feishu_manager_missing", "resolve_and_save_feishu_manager"
+    if (
+        destination == "create"
+        and config["feishu"]["identity"] == "bot"
+        and config["feishu"]["manager_access"] != "approved"
+    ):
+        return "feishu_manager_access_unconfirmed", "ask_user_for_management_access"
     if not (config["feishu"]["base_token"] and config["feishu"]["table_id"]):
         if destination == "create":
             return "feishu_target_pending", "provision_configured_feishu_base"

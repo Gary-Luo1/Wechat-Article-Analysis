@@ -14,13 +14,13 @@ PYTHON_BIN=""
 for candidate in "${CANDIDATES[@]}"; do
   [[ -x "$candidate" ]] || continue
   "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' || continue
-  "$candidate" -c 'import bs4, requests' >/dev/null 2>&1 || continue
+  "$candidate" -c 'import bs4, curl_cffi, requests' >/dev/null 2>&1 || continue
   PYTHON_BIN="$candidate"
   break
 done
 
 if [[ -z "$PYTHON_BIN" ]]; then
-  echo "Python 3.9+ with requests and beautifulsoup4 is required; run the installer or set WECHAT_ARTICLE_PYTHON" >&2
+  echo "Python 3.9+ with curl_cffi, requests, and beautifulsoup4 is required; run the installer or set WECHAT_ARTICLE_PYTHON" >&2
   exit 1
 fi
 

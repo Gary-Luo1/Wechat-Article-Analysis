@@ -82,3 +82,19 @@ def test_saving_changed_mapping_updates_the_explicit_sync_target(tmp_path, monke
     saved = load_config()
     assert saved["feishu"]["field_mapping"] == MAPPING_B
     capsys.readouterr()
+
+
+def test_completed_review_is_written_as_read():
+    from bitable_client import build_record
+
+    record = build_record(
+        {
+            "title": "Reviewed",
+            "account": "Example",
+            "link": "https://mp.weixin.qq.com/s/read",
+            "update_time": 1_700_000_000,
+        },
+        {"score": 8, "rationale": "reviewed", "summary": "done"},
+    )
+
+    assert record["阅读状态"] == "已读"

@@ -99,6 +99,22 @@ def test_modify_config_validation_failure_does_not_write(tmp_path, monkeypatch):
     assert load_config() == before
 
 
+def test_v11_unscoped_manager_approval_migrates_to_undecided():
+    from config_store import DEFAULT_CONFIG, validate_config
+
+    legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+    legacy["version"] = 11
+    legacy["feishu"]["manager_access"] = "approved"
+    legacy["feishu"].pop("manager_access_base_name", None)
+    legacy["feishu"].pop("manager_access_table_name", None)
+
+    migrated = validate_config(legacy)
+    assert migrated["version"] == 12
+    assert migrated["feishu"]["manager_access"] == "undecided"
+    assert migrated["feishu"]["manager_access_base_name"] == ""
+    assert migrated["feishu"]["manager_access_table_name"] == ""
+
+
 def test_config_lock_serializes_cross_process_updates(tmp_path, monkeypatch):
     monkeypatch.setenv("WECHAT_ARTICLE_HOME", str(tmp_path / "state"))
     home = tmp_path / "state"

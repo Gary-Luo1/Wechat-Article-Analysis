@@ -190,7 +190,7 @@ class TestConfig:
         assert result.returncode == 2
         assert "runtime-cookie-secret" not in result.stdout + result.stderr
         assert "runtime-token-secret" not in result.stdout + result.stderr
-        assert "usage: runtime.py {process|manage|lark}" in result.stderr
+        assert "usage: runtime.py {process|manage}" in result.stderr
 
     def test_agent_file_fallback_is_scoped_consumed_and_redacted(
         self, capsys: pytest.CaptureFixture[str]
@@ -664,6 +664,7 @@ def test_runtime_can_use_ready_system_python(monkeypatch: pytest.MonkeyPatch):
 
     completed = mock.Mock(returncode=0)
     monkeypatch.setattr(runtime, "_venv_python", lambda: Path("missing-python"))
+    monkeypatch.setattr(runtime, "_system_runtime_is_ready", lambda command: True)
     monkeypatch.setattr(runtime.subprocess, "run", mock.Mock(return_value=completed))
     assert runtime.main(["process", "--help"]) == 0
     assert runtime.subprocess.run.call_args.args[0][0] == str(Path(runtime.sys.executable))
@@ -693,8 +694,12 @@ def test_queue_only_process_command_does_not_require_article_parser(
 
 def test_runtime_allows_local_process_commands_without_article_dependencies():
     import runtime
+    import sys
 
-    assert runtime._system_runtime_is_ready("process") is True
+    if "curl_cffi" in sys.modules:
+        assert runtime._system_runtime_is_ready("process") is True
+    else:
+        assert runtime._system_runtime_is_ready("process") is False
 
 
 def test_runtime_venv_follows_state_override():

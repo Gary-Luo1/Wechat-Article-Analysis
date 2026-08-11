@@ -11,8 +11,13 @@ timestamp and SHA-256 fingerprint, not the body.
 
 ## External writes
 
-Feishu is optional. Require an explicit `--feishu` command flag for each write;
-`--force-feishu` applies only to the current article. Verify a configured target
-with `feishu-check` before first use, use URL-based upserts, and retain failed
-writes locally for retry. Do not log or return Feishu credentials, access tokens,
-or full credential-bearing subprocess arguments.
+Feishu is optional. Require an explicit `--feishu` command flag for each article
+write. Base creation is a separate explicit managed action and requires user
+identity plus exact-name management approval. Portable Bot Base creation and
+manager grants are disabled because host-event sender identity is not
+cryptographically authenticated by this runtime.
+Do not expose a raw CLI data-command entry or accept resource tokens on public
+management command lines. `--force-feishu` applies only to the current article.
+Verify a configured target with `feishu-check` before first use, use URL-based
+upserts, and retain failed writes locally for retry. Do not log or return Feishu
+credentials, access tokens, or full credential-bearing subprocess arguments.

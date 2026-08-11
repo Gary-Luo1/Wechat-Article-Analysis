@@ -103,7 +103,9 @@ function Prepare-Skill([string]$Kind) {
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceDir "agents") -File | Where-Object { $_.Extension -in @(".yaml", ".yml") }) {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $temporary "agents") -Force
     }
-    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceDir "scripts") -File | Where-Object { $_.Extension -in @(".py", ".sh", ".ps1") }) {
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceDir "scripts") -File | Where-Object {
+        $_.Extension -in @(".py", ".sh", ".ps1") -and $_.Name -notin @("init_config.py", "lark_cli.py")
+    }) {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $temporary "scripts") -Force
     }
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceDir "references") -File -Filter "*.md") {

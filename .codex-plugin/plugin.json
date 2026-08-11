@@ -1,19 +1,19 @@
 {
   "name": "wechat-article-subscriber",
   "version": "2.3.0",
-  "description": "Local-first WeChat Official Account article discovery and Feishu Base workflow.",
+  "description": "Review user-supplied WeChat article links and optionally sync results to Feishu Base.",
   "author": "Gray",
-  "repository": "https://github.com/Gary-Luo1/wechat-article-subscriber",
+  "repository": "https://github.com/Gary-Luo1/wechat-article-link-reviewer",
   "license": "MIT",
   "keywords": ["wechat", "feishu", "article", "local-first"],
   "skills": "./skills",
   "interface": {
-    "displayName": "WeChat Article Subscriber",
-    "shortDescription": "Discover, evaluate, and organize WeChat articles locally.",
-    "longDescription": "A local-first workflow for WeChat Official Account article discovery, scoring, inbox management, and optional Feishu Base synchronization.",
+    "displayName": "WeChat Article Link Reviewer",
+    "shortDescription": "Review supplied WeChat links and save selected results.",
+    "longDescription": "A link-only workflow for reading, scoring, and organizing user-supplied WeChat articles, with optional controlled Feishu Base synchronization.",
     "developerName": "Gray",
     "category": "Productivity",
     "capabilities": ["local-files", "network", "feishu-sync"],
-    "defaultPrompt": "Help me configure or run the WeChat Article Subscriber workflow."
+    "defaultPrompt": "Help me review a supplied WeChat article link and optionally save the result to Feishu Base."
   }
 }

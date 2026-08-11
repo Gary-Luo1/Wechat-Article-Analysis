@@ -465,7 +465,7 @@ def pending_sync_entries() -> list[dict[str, Any]]:
     ]
 
 
-def cleanup_processed(max_age_days: int = MAX_PROCESSED_AGE_DAYS) -> int:
+def cleanup_processed(max_age_days: int = MAX_PROCESSED_AGE_DAYS, *, dry_run: bool = False) -> int:
     if max_age_days < 1:
         raise ValueError("max_age_days must be positive")
     cutoff = time.time() - max_age_days * 86400
@@ -484,9 +484,11 @@ def cleanup_processed(max_age_days: int = MAX_PROCESSED_AGE_DAYS) -> int:
                 continue
             if timestamp >= cutoff:
                 retained[link] = entry
-        data["processed"] = retained
-        _write_unlocked(data)
-        return before - len(retained)
+        removed = before - len(retained)
+        if not dry_run and removed:
+            data["processed"] = retained
+            _write_unlocked(data)
+        return removed
 
 
 def export_queue(path: Path) -> Path:

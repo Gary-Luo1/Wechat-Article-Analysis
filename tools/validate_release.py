@@ -88,6 +88,10 @@ def validate_adapters() -> None:
         fields, text = read_frontmatter(skill_md)
         if fields["name"] != "wechat-article-subscriber":
             fail(f"adapter name is invalid: {skill_md.relative_to(ROOT)}")
+        if "Article Link Reviewer" not in fields["description"]:
+            fail(f"adapter description is not link-reviewer scoped: {skill_md.relative_to(ROOT)}")
+        if "# WeChat Article Link Reviewer" not in text:
+            fail(f"adapter title is stale: {skill_md.relative_to(ROOT)}")
         if canonical_reference not in text:
             fail(f"adapter does not reference canonical Skill: {skill_md.relative_to(ROOT)}")
         contents = {path.name for path in adapter.iterdir()}

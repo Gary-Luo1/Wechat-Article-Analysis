@@ -97,7 +97,12 @@ prepare_skill() {
   cp "$SOURCE_DIR/SKILL.md" "$SOURCE_DIR/requirements.txt" "$temporary/"
   mkdir "$temporary/agents" "$temporary/scripts" "$temporary/references"
   cp "$SOURCE_DIR/agents/"*.yaml "$temporary/agents/"
-  cp "$SOURCE_DIR/scripts/"*.py "$SOURCE_DIR/scripts/"*.sh "$SOURCE_DIR/scripts/"*.ps1 "$temporary/scripts/"
+  for script in "$SOURCE_DIR/scripts/"*.py "$SOURCE_DIR/scripts/"*.sh "$SOURCE_DIR/scripts/"*.ps1; do
+    case "$(basename "$script")" in
+      init_config.py|lark_cli.py) continue ;;
+    esac
+    cp "$script" "$temporary/scripts/"
+  done
   cp "$SOURCE_DIR/references/"*.md "$temporary/references/"
   if [ -d "$SOURCE_DIR/assets" ]; then cp -R "$SOURCE_DIR/assets" "$temporary/"; fi
   backup="$(backup_path "$destination")"

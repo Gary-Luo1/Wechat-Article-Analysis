@@ -15,6 +15,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from article_inbox import queue_summary
 from bitable_client import (
@@ -22,7 +23,6 @@ from bitable_client import (
     create_standard_base,
     created_base_identifiers,
     feishu_identity_context,
-    grant_bot_created_resource,
     lark_cli_info,
     preflight_feishu,
     resolve_lark_profile,
@@ -40,6 +40,7 @@ from config_store import (
 )
 from execution_policy import (
     allows_automatic_provisioning,
+    invalidate_for_feishu_change,
     invalidate_policy,
     next_stage,
     policy_for,
@@ -101,6 +102,12 @@ ACTION_LABELS = {
 
 def _authorization(config: dict[str, Any]) -> dict[str, Any]:
     return config["setup"]["feishu_authorization"]
+
+
+def _reset_manager_access(config: dict[str, Any]) -> None:
+    config["feishu"]["manager_access"] = "undecided"
+    config["feishu"]["manager_access_base_name"] = ""
+    config["feishu"]["manager_access_table_name"] = ""
 
 
 def _reset_authorization(config: dict[str, Any], identity: str) -> None:
@@ -234,6 +241,15 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
     state: dict[str, Any] = {}
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        if (
+            destination == "create"
+            and config["setup"]["feishu_identity_confirmed"]
+            and config["feishu"]["identity"] == "bot"
+        ):
+            raise ValueError(
+                "new Base creation requires user identity; switch identity before "
+                "choosing destination=create"
+            )
         previous = str(config["feishu"].get("destination") or "undecided")
         config["feishu"]["destination"] = destination
         if destination == "skip":
@@ -241,6 +257,7 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
         state["previous"] = previous
         state["changed"] = previous != destination
         if state["changed"]:
+            _reset_manager_access(config)
             invalidate_policy(config)
         return config
 
@@ -257,6 +274,94 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
         "target_or_credentials_deleted": False,
         "execution_policy_invalidated": state["changed"],
     }, next_action
+
+
+def _parse_feishu_target_url(value: str) -> tuple[str, str, str]:
+    raw = value.strip()
+    if not raw or len(raw) > 4096:
+        raise ValueError("provide one bounded Feishu Base table URL")
+    parsed = urlparse(raw)
+    host = str(parsed.hostname or "").casefold()
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or not host.endswith((".feishu.cn", ".larksuite.com"))
+    ):
+        raise ValueError("Feishu Base URL must use HTTPS on a feishu.cn or larksuite.com host")
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) < 2 or segments[0] != "base":
+        raise ValueError("Feishu Base URL must contain /base/<BASE_TOKEN>")
+    base_token = segments[1].strip()
+    tables = [item.strip() for item in parse_qs(parsed.query).get("table", []) if item.strip()]
+    if len(tables) != 1:
+        raise ValueError("Feishu Base URL must identify exactly one table")
+    table_id = tables[0]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,128}", base_token):
+        raise ValueError("Feishu Base URL contains an invalid Base token")
+    if not re.fullmatch(r"tbl[A-Za-z0-9_-]{3,125}", table_id):
+        raise ValueError("Feishu Base URL contains an invalid table ID")
+    return base_token, table_id, host
+
+
+def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    if sys.stdin.isatty():
+        raise ValueError("feishu-target --url-stdin requires a Base table URL on stdin")
+    raw = sys.stdin.read(4097)
+    base_token, table_id, host = _parse_feishu_target_url(raw)
+    current = load_config()
+    if current["feishu"]["destination"] != "existing":
+        raise ValueError("choose destination=existing before configuring a Base table URL")
+    changed = (
+        current["feishu"].get("base_token") != base_token
+        or current["feishu"].get("table_id") != table_id
+    )
+    preview = {
+        "destination": "existing",
+        "host": host,
+        "target_changed": changed,
+        "resource_tokens_included": False,
+        "next_check": "process feishu-check --save-mapping",
+    }
+    if not arguments.yes:
+        return {"preview": preview, "configured": False}, "rerun_with_yes"
+
+    state: dict[str, Any] = {}
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        previous = deepcopy(config["feishu"])
+        same_target = (
+            previous.get("base_token") == base_token
+            and previous.get("table_id") == table_id
+        )
+        config["feishu"].update(
+            {
+                "destination": "existing",
+                "enabled": True,
+                "base_token": base_token,
+                "table_id": table_id,
+                "provisioning": "existing",
+                "created_base_name": "",
+                "created_table_name": "",
+            }
+        )
+        if not same_target:
+            config["feishu"]["field_mapping"] = {}
+            config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
+        state["policy_invalidated"] = invalidate_for_feishu_change(
+            config,
+            previous,
+            config["feishu"],
+        )
+        return config
+
+    modify_config(mutate)
+    return {
+        **preview,
+        "configured": True,
+        "execution_policy_invalidated": bool(state.get("policy_invalidated")),
+    }, "authorize_and_run_feishu_check"
 
 
 def _import_feishu_host_context(
@@ -287,7 +392,11 @@ def _import_feishu_host_context(
             "Feishu host context source must be openclaw, hermes, or lark-channel"
         )
     detected_source = _detect_agent_source()
-    if detected_source and detected_source != source:
+    if not detected_source:
+        raise ValueError(
+            "trusted Feishu host context requires a detected supported Agent runtime"
+        )
+    if detected_source != source:
         raise ValueError(
             "Feishu host context source conflicts with the detected Agent runtime"
         )
@@ -304,10 +413,9 @@ def _import_feishu_host_context(
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
         destination = config["feishu"]["destination"]
-        if destination not in {"existing", "create"}:
+        if destination != "existing":
             raise ValueError(
-                "choose existing or create as the Feishu destination before importing "
-                "the current bot context"
+                "choose destination=existing before importing current Bot host context"
             )
         if (
             config["setup"]["feishu_identity_confirmed"]
@@ -322,18 +430,19 @@ def _import_feishu_host_context(
             raise ValueError(
                 "the current Feishu conversation App ID conflicts with the saved App ID"
             )
-        manager_open_id = str(config["feishu"].get("manager_open_id") or "").strip()
-        if manager_open_id and manager_open_id != sender_open_id:
-            raise ValueError(
-                "the current Feishu sender conflicts with the saved human manager"
-            )
-
         previous_scope = (
             config["feishu"]["identity"],
             config["feishu"]["binding_mode"],
             config["feishu"]["agent_source"],
             config["feishu"]["expected_app_id"],
             config["feishu"]["manager_open_id"],
+            config["feishu"]["manager_access"],
+        )
+        same_trusted_context = (
+            config["feishu"]["identity"] == "bot"
+            and config["feishu"]["binding_mode"] == "agent"
+            and config["feishu"]["agent_source"] == source
+            and config["feishu"]["expected_app_id"] == app_id
         )
         config["feishu"].update(
             {
@@ -343,7 +452,22 @@ def _import_feishu_host_context(
                 "expected_app_id": app_id,
                 "cli_profile": "",
                 "expected_user_open_id": "",
-                "manager_open_id": sender_open_id,
+                "manager_open_id": "",
+                "manager_access": (
+                    config["feishu"].get("manager_access", "undecided")
+                    if same_trusted_context
+                    else "undecided"
+                ),
+                "manager_access_base_name": (
+                    config["feishu"].get("manager_access_base_name", "")
+                    if same_trusted_context
+                    else ""
+                ),
+                "manager_access_table_name": (
+                    config["feishu"].get("manager_access_table_name", "")
+                    if same_trusted_context
+                    else ""
+                ),
             }
         )
         config["setup"]["feishu_identity_confirmed"] = True
@@ -354,6 +478,7 @@ def _import_feishu_host_context(
             config["feishu"]["agent_source"],
             config["feishu"]["expected_app_id"],
             config["feishu"]["manager_open_id"],
+            config["feishu"]["manager_access"],
         )
         state["changed"] = previous_scope != current_scope
         if state["changed"]:
@@ -367,7 +492,8 @@ def _import_feishu_host_context(
         "app_id": app_id,
         "identity": "bot",
         "identity_confirmed": True,
-        "manager_configured_from_sender": True,
+        "manager_configured_from_sender": False,
+        "sender_persisted": False,
         "sender_open_id_included": False,
         "binding_mode": "agent",
         "execution_policy_invalidated": state["changed"],
@@ -516,8 +642,6 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
         return context, "reuse_existing_user_authorization_and_confirm_context"
     if not ready:
         return context, "configure_bot_credentials_and_scopes_without_user_auth"
-    if not current["feishu"].get("manager_open_id"):
-        return context, "resolve_and_save_feishu_manager"
     return context, "confirm_feishu_app_and_bot"
 
 
@@ -534,6 +658,13 @@ def _feishu_identity(identity: str) -> dict[str, Any]:
         if state["changed"]:
             config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
             _reset_authorization(config, identity)
+            _reset_manager_access(config)
+            config["feishu"]["manager_open_id"] = ""
+            if config["feishu"].get("binding_mode") == "agent":
+                config["feishu"]["binding_mode"] = ""
+                config["feishu"]["agent_source"] = ""
+                config["feishu"]["expected_app_id"] = ""
+                config["feishu"]["cli_profile"] = ""
             invalidate_policy(config)
         return config
 
@@ -574,6 +705,9 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
                     "enabled": False,
                     "expected_user_open_id": "",
                     "manager_open_id": "",
+                    "manager_access": "undecided",
+                    "manager_access_base_name": "",
+                    "manager_access_table_name": "",
                     "base_token": "",
                     "table_id": "",
                     "provisioning": "",
@@ -673,36 +807,6 @@ def _feishu_local_profile(
     return result, "run_feishu_context_then_authorize_only_if_needed"
 
 
-def _feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
-    config = load_config()
-    if not config["setup"]["feishu_identity_confirmed"]:
-        raise LarkCLIError(
-            "confirm bot identity before creating or sharing a Feishu resource",
-            kind="wrong_app",
-        )
-    if config["feishu"]["identity"] != "bot":
-        raise LarkCLIError(
-            "automatic manager provisioning applies only to bot-created resources",
-            kind="config",
-        )
-    manager_open_id = str(config["feishu"].get("manager_open_id") or "").strip()
-    if not manager_open_id:
-        raise LarkCLIError(
-            "no human manager is configured. Resolve the invoking user's exact open_id "
-            "and save it as feishu.manager_open_id before bot provisioning.",
-            kind="config",
-        )
-    verify_feishu_identity(config["feishu"], identity="bot")
-    grant_bot_created_resource(arguments.token, arguments.resource_type, manager_open_id)
-    return {
-        "resource_type": arguments.resource_type,
-        "permission": "full_access",
-        "manager_granted": True,
-        "manager_open_id_included": False,
-        "identity": "bot",
-    }, "continue_resource_provisioning"
-
-
 def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     config = load_config()
     if config["feishu"]["destination"] != "create":
@@ -720,6 +824,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
     schema = standard_field_schema()
     base_name = " ".join(str(arguments.name).split())
     table_name = " ".join(str(arguments.table_name).split())
+    manager_access = str(config["feishu"].get("manager_access") or "undecided")
     preview = {
         "base_name": base_name,
         "table_name": table_name,
@@ -780,11 +885,24 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             "select the Skill-owned Feishu app/profile before Base creation",
             kind="config",
         )
-    manager_open_id = str(config["feishu"].get("manager_open_id") or "").strip()
-    if identity == "bot" and not manager_open_id:
+    if identity == "bot":
         raise LarkCLIError(
-            "configure the invoking user as manager before bot Base creation",
-            kind="config",
+            "bot Base creation is disabled because this runtime cannot authenticate "
+            "a host-event sender; use user identity or an existing Base",
+            kind="confirmation",
+        )
+    if manager_access != "approved":
+        raise LarkCLIError(
+            "Base creation requires the user's approved management-access choice",
+            kind="confirmation",
+        )
+    if (
+        config["feishu"].get("manager_access_base_name") != base_name
+        or config["feishu"].get("manager_access_table_name") != table_name
+    ):
+        raise LarkCLIError(
+            "management-access approval does not match this Base/table",
+            kind="confirmation",
         )
     verify_feishu_identity(config["feishu"], identity=identity)
     if resuming:
@@ -821,17 +939,6 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         return config
 
     config = modify_config(mutate_created)
-    manager_granted = identity != "bot"
-    if identity == "bot":
-        try:
-            grant_bot_created_resource(base_token, "bitable", manager_open_id)
-        except LarkCLIError as exc:
-            if not resuming or exc.kind != "duplicate":
-                raise
-            # Re-running after a partial grant reports the member as already
-            # present (classified as kind="duplicate"); treat that as success.
-        manager_granted = True
-
     check = preflight_feishu(config["feishu"])
 
     def mutate_complete(config: dict[str, Any]) -> dict[str, Any]:
@@ -851,9 +958,10 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
     return {
         "created": True,
         **preview,
-        "base_token": base_token,
-        "table_id": table_id,
-        "manager_granted": manager_granted,
+        "target_configured": True,
+        "resource_tokens_included": False,
+        "creation_identity": "user",
+        "separate_manager_grant_performed": False,
         "field_mapping_saved": True,
         "resumed_existing": resuming,
         "provisioning_approval_consumed": policy_authorized,
@@ -863,25 +971,50 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
     }, "none"
 
 
-def _feishu_manager(open_id: str) -> dict[str, Any]:
-    normalized = open_id.strip()
-    if not normalized.startswith("ou_"):
-        raise ValueError("manager Open ID must start with ou_")
+def _feishu_manager_access(
+    mode: str, *, base_name: str | None = None, table_name: str | None = None
+) -> dict[str, Any]:
+    selected = "approved" if mode == "approve" else "declined"
+    normalized_base_name = " ".join(str(base_name or "").split())
+    normalized_table_name = " ".join(str(table_name or "").split())
+    if selected == "approved" and not (normalized_base_name and normalized_table_name):
+        raise ValueError("approve requires --base-name and --table-name")
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        if not config["setup"]["feishu_identity_confirmed"] or config["feishu"]["identity"] != "bot":
-            raise ValueError("select and confirm bot identity before setting its human manager")
-        previous = str(config["feishu"].get("manager_open_id") or "")
-        config["feishu"]["manager_open_id"] = normalized
-        if previous != normalized:
+        if config["feishu"]["destination"] != "create":
+            raise ValueError("management access is only selectable for a new Base")
+        if not config["setup"]["feishu_identity_confirmed"]:
+            raise ValueError("confirm Feishu identity before choosing management access")
+        if config["feishu"]["identity"] != "user":
+            raise ValueError(
+                "management access for a new Base requires user identity; "
+                "bot-created Base grants are disabled"
+            )
+        previous = config["feishu"].get("manager_access", "undecided")
+        config["feishu"]["manager_access"] = selected
+        previous_names = (
+            config["feishu"].get("manager_access_base_name", ""),
+            config["feishu"].get("manager_access_table_name", ""),
+        )
+        config["feishu"]["manager_access_base_name"] = (
+            normalized_base_name if selected == "approved" else ""
+        )
+        config["feishu"]["manager_access_table_name"] = (
+            normalized_table_name if selected == "approved" else ""
+        )
+        if previous != selected or previous_names != (
+            config["feishu"]["manager_access_base_name"],
+            config["feishu"]["manager_access_table_name"],
+        ):
             invalidate_policy(config)
         return config
 
     modify_config(mutate)
     return {
-        "manager_configured": True,
-        "manager_open_id_included": False,
-        "permission_for_new_bot_resources": "full_access",
+        "manager_access": selected,
+        "creation_identity": "user",
+        "external_resource_changed": False,
+        "approval_scoped_to_names": selected == "approved",
     }
 
 
@@ -1378,6 +1511,9 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 "cli_profile": "",
                 "expected_user_open_id": "",
                 "manager_open_id": "",
+                "manager_access": "undecided",
+                "manager_access_base_name": "",
+                "manager_access_table_name": "",
                 "base_token": "",
                 "table_id": "",
                 "field_mapping": {},
@@ -1441,6 +1577,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("skip", "existing", "create"),
         required=True,
     )
+    target = commands.add_parser("feishu-target")
+    target.add_argument(
+        "--url-stdin",
+        action="store_true",
+        required=True,
+        help="read one exact existing Base table URL from stdin without echoing tokens",
+    )
+    target.add_argument("--yes", action="store_true")
     host_context = commands.add_parser("feishu-host-context")
     host_sources = host_context.add_mutually_exclusive_group(required=True)
     host_sources.add_argument(
@@ -1464,16 +1608,10 @@ def build_parser() -> argparse.ArgumentParser:
     local_profile_commands.add_parser("scan")
     import_profile = local_profile_commands.add_parser("import")
     import_profile.add_argument("--yes", action="store_true")
-    manager = commands.add_parser("feishu-manager")
-    manager.add_argument("--open-id", required=True)
-    grant_manager = commands.add_parser("feishu-grant-manager")
-    grant_manager.add_argument("--token", required=True)
-    grant_manager.add_argument(
-        "--type",
-        dest="resource_type",
-        choices=("bitable", "doc", "docx", "file", "folder", "sheet", "slides", "wiki"),
-        required=True,
-    )
+    manager_access = commands.add_parser("feishu-manager-access")
+    manager_access.add_argument("--mode", choices=("approve", "decline"), required=True)
+    manager_access.add_argument("--base-name")
+    manager_access.add_argument("--table-name")
     create_base = commands.add_parser("feishu-create-base")
     create_base.add_argument("--name", required=True)
     create_base.add_argument("--table-name", required=True)
@@ -1520,6 +1658,8 @@ def main(argv: list[str] | None = None) -> int:
             data, next_action = _execution_policy_command(arguments)
         elif arguments.command == "feishu-destination":
             data, next_action = _feishu_destination(arguments.mode)
+        elif arguments.command == "feishu-target":
+            data, next_action = _feishu_target(arguments)
         elif arguments.command == "feishu-host-context":
             data, next_action = _import_feishu_host_context(arguments)
         elif arguments.command == "feishu-context":
@@ -1532,11 +1672,17 @@ def main(argv: list[str] | None = None) -> int:
             next_action = "reuse_or_configure_private_lark_profile"
         elif arguments.command == "feishu-local-profile":
             data, next_action = _feishu_local_profile(arguments)
-        elif arguments.command == "feishu-manager":
-            data = _feishu_manager(arguments.open_id)
-            next_action = "confirm_feishu_app_and_bot"
-        elif arguments.command == "feishu-grant-manager":
-            data, next_action = _feishu_grant_manager(arguments)
+        elif arguments.command == "feishu-manager-access":
+            data = _feishu_manager_access(
+                arguments.mode,
+                base_name=arguments.base_name,
+                table_name=arguments.table_name,
+            )
+            next_action = (
+                "preview_feishu_base_creation"
+                if arguments.mode == "approve"
+                else "choose_existing_base_or_user_identity"
+            )
         elif arguments.command == "feishu-create-base":
             data, next_action = _feishu_create_base(arguments)
         elif arguments.command == "feishu-auth":

@@ -26,10 +26,10 @@ foreach ($candidate in $candidates) {
     } catch {
         continue
     }
-    & $candidate.Source @($candidate.Prefix) -c "import bs4, requests" 2>$null
+    & $candidate.Source @($candidate.Prefix) -c "import bs4, curl_cffi, requests" 2>$null
     if ($LASTEXITCODE -ne 0) { continue }
     & $candidate.Source @($candidate.Prefix) (Join-Path $scriptRoot "runtime.py") @CommandArgs
     exit $LASTEXITCODE
 }
 
-throw "Python 3.9+ with requests and beautifulsoup4 is required; run the installer or set WECHAT_ARTICLE_PYTHON"
+throw "Python 3.9+ with curl_cffi, requests, and beautifulsoup4 is required; run the installer or set WECHAT_ARTICLE_PYTHON"

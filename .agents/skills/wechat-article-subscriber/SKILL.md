@@ -1,8 +1,8 @@
 ---
 name: wechat-article-subscriber
-description: Project adapter for the canonical WeChat Article Subscriber Skill.
+description: Project adapter for the canonical WeChat Article Link Reviewer Skill for user-supplied links.
 ---
 
-# WeChat Article Subscriber
+# WeChat Article Link Reviewer
 
 Use the canonical implementation at [the bundled Skill](../../../skills/wechat-article-subscriber/SKILL.md).

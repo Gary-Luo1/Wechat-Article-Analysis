@@ -14,7 +14,6 @@ from paths import venv_dir
 COMMANDS = {
     "process": "process_pending.py",
     "manage": "manage.py",
-    "lark": "lark_cli.py",
 }
 
 
@@ -25,6 +24,7 @@ def _venv_python() -> Path:
 
 def _system_runtime_is_ready(command: str) -> bool:
     try:
+        __import__("curl_cffi")
         __import__("requests")
         __import__("bs4")
     except ImportError:
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
             reconfigure(encoding="utf-8", errors="replace")
     args = list(argv if argv is not None else sys.argv[1:])
     if not args or args[0] not in COMMANDS:
-        print("usage: runtime.py {process|manage|lark} [args...]", file=sys.stderr)
+        print("usage: runtime.py {process|manage} [args...]", file=sys.stderr)
         return 2
     command = args.pop(0)
     script = Path(__file__).resolve().parent / COMMANDS[command]

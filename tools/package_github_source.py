@@ -60,6 +60,8 @@ FORBIDDEN_NAMES = {
     "config.json",
     "queue.json",
     "queue.lock",
+    "init_config.py",
+    "lark_cli.py",
 }
 
 

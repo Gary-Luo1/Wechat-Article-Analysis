@@ -48,6 +48,7 @@ from url_identity import canonicalize_wechat_article_url
 
 
 logger = logging.getLogger("wechat-process")
+MAX_BATCH_CONTENT_CHARS = 200_000
 
 
 def fetch_article(url: str, **kwargs: Any) -> dict[str, Any]:
@@ -86,6 +87,36 @@ class BatchRiskControlError(ValueError):
             "blocked_url": str(article.get("link", "")),
             "successful": successful,
         }
+
+
+class BatchReadError(ValueError):
+    """Summarize batch item failures without losing their retry semantics."""
+
+    def __init__(self, failures: list[Exception], successful: int) -> None:
+        primary = next(
+            (
+                failure
+                for failure in failures
+                if not bool(getattr(failure, "retryable", False))
+            ),
+            failures[0],
+        )
+        self.code = str(getattr(primary, "code", "ARTICLE_FETCH_FAILED"))
+        self.retryable = all(bool(getattr(failure, "retryable", False)) for failure in failures)
+        self.next_action = str(getattr(primary, "next_action", "inspect_failed_items"))
+        failure_codes = [
+            str(getattr(failure, "code", "ARTICLE_FETCH_FAILED"))
+            for failure in failures
+        ]
+        self.details = {
+            "successful": successful,
+            "failed": len(failures),
+            "failure_codes": failure_codes,
+        }
+        super().__init__(
+            f"batch read completed with {len(failures)} failed article(s); "
+            f"{successful} succeeded"
+        )
 
 
 def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -219,6 +250,7 @@ def _print_article(
     *,
     session: Any | None = None,
     pacer: RequestPacer | None = None,
+    max_output_chars: int | None = None,
 ) -> tuple[str, bool]:
     print(f"Title: {article.get('title', '')}")
     print(f"Account: {article.get('account', '')}")
@@ -228,7 +260,10 @@ def _print_article(
     document = fetch_article(str(article["link"]), session=session, pacer=pacer)
     text = str(document["text"])
     record_verified_read(str(article["link"]), text)
-    print(text)
+    displayed = text if max_output_chars is None else text[:max(0, max_output_chars)]
+    print(displayed)
+    if len(displayed) < len(text):
+        print(f"[Content output truncated: {len(text) - len(displayed)} character(s) omitted]")
     print("--- END UNTRUSTED ARTICLE CONTENT ---")
     suspected = is_advertisement(str(article.get("title", "")), text or "")
     print(f"Ad heuristic: {'suspected' if suspected else 'not detected'}")
@@ -252,27 +287,35 @@ def cmd_batch_read(limit: int) -> int:
         return 0
     requested = min(limit, len(pending))
     successful = 0
-    failures = 0
+    failures: list[Exception] = []
+    remaining_output = MAX_BATCH_CONTENT_CHARS
     session = new_session()
     pacer = RequestPacer(_configured_request_delay())
     try:
         for index, article in enumerate(pending[:limit], start=1):
             print(f"\n===== ARTICLE {index}/{requested} =====")
             try:
-                _print_article(article, session=session, pacer=pacer)
+                text, _ = _print_article(
+                    article,
+                    session=session,
+                    pacer=pacer,
+                    max_output_chars=remaining_output,
+                )
+                remaining_output = max(
+                    0, remaining_output - min(len(text), remaining_output)
+                )
                 successful += 1
             except WeChatRiskControlError as exc:
                 raise BatchRiskControlError(article, successful) from exc
             except ArticleFetchError as exc:
-                failures += 1
+                failures.append(exc)
                 print(f"[Article read failed: {exc.code}]")
     finally:
         session.close()
     if len(pending) > limit:
         print(f"Stopped at --limit {limit}; {len(pending) - limit} articles remain")
     if failures:
-        print(f"Batch read completed with {failures} failed article(s); {successful} succeeded")
-        return 1
+        raise BatchReadError(failures, successful)
     return 0
 
 
@@ -478,6 +521,11 @@ def cmd_done(arguments: argparse.Namespace) -> int:
 
 
 def cmd_sync_all(*, dry_run: bool = False) -> int:
+    if not dry_run:
+        raise ValueError(
+            "bulk Feishu sync is preview-only; retry each explicitly confirmed "
+            "article with sync-feishu --link"
+        )
     entries = pending_sync_entries()
     if not entries:
         print("No articles are waiting for Feishu sync")
@@ -493,6 +541,39 @@ def cmd_sync_all(*, dry_run: bool = False) -> int:
                 update_sync_status(entry["article"]["link"], "pending", str(exc))
             print(f"Sync failed: {entry['article'].get('title', '')}: {exc}")
     _raise_sync_failures(failures, prefix="one or more Feishu sync operations failed")
+    return 0
+
+
+def cmd_sync_one(link: str, *, dry_run: bool = False, force_feishu: bool = False) -> int:
+    entry = get_processed_entry(link)
+    if entry is None:
+        raise LookupError("no processed article matches that URL")
+    metadata = entry.get("metadata", {})
+    if metadata.get("disposition") == "dismissed" or metadata.get("ad"):
+        raise ValueError("dismissed or advertisement articles cannot be synced to Feishu")
+    if entry.get("sync_status") == "synced":
+        print(f"Already synced: {entry['article'].get('title', '')}")
+        return 0
+    score = metadata.get("score")
+    if not isinstance(score, (int, float)):
+        raise ValueError("processed article has no valid score to sync")
+    config = load_config()
+    if not force_feishu and not should_sync(float(score), config["settings"]["min_score"]):
+        raise ValueError(
+            "article score is below the configured Feishu threshold; "
+            "use --force-feishu only after explicit per-article confirmation"
+        )
+    try:
+        _sync_entry(entry, dry_run=dry_run)
+    except (ConfigError, LarkCLIError, ValueError) as exc:
+        if not dry_run:
+            update_sync_status(entry["article"]["link"], "pending", str(exc))
+        _raise_sync_failures(
+            [exc],
+            prefix="processed article remains local because Feishu sync failed",
+        )
+    action = "Dry run succeeded" if dry_run else "Synced"
+    print(f"{action}: {entry['article'].get('title', '')}")
     return 0
 
 
@@ -609,7 +690,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     done_parser.add_argument("--dry-run", action="store_true")
     sync_parser = commands.add_parser("sync-feishu")
-    sync_parser.add_argument("--all", action="store_true", required=True)
+    sync_selector = sync_parser.add_mutually_exclusive_group(required=True)
+    sync_selector.add_argument("--all", action="store_true")
+    sync_selector.add_argument("--link")
+    sync_parser.add_argument("--force-feishu", action="store_true")
     sync_parser.add_argument("--dry-run", action="store_true")
     check_parser = commands.add_parser("feishu-check")
     check_parser.add_argument("--save-mapping", action="store_true")
@@ -618,6 +702,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("path", type=Path)
     clean_parser = commands.add_parser("clean")
     clean_parser.add_argument("--days", type=int, default=365)
+    clean_parser.add_argument("--yes", action="store_true")
     return parser
 
 
@@ -653,6 +738,14 @@ def _dispatch(arguments: argparse.Namespace) -> int:
             raise ValueError("provide an index or --link")
         return cmd_done(arguments)
     if arguments.command == "sync-feishu":
+        if arguments.force_feishu and not arguments.link:
+            raise ValueError("--force-feishu requires --link")
+        if arguments.link:
+            return cmd_sync_one(
+                arguments.link,
+                dry_run=arguments.dry_run,
+                force_feishu=arguments.force_feishu,
+            )
         return cmd_sync_all(dry_run=arguments.dry_run)
     if arguments.command == "feishu-check":
         return cmd_feishu_check(save_mapping=arguments.save_mapping)
@@ -662,7 +755,14 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         print(export_queue(arguments.path))
         return 0
     if arguments.command == "clean":
-        print(f"Removed {cleanup_processed(arguments.days)} old records")
+        candidates = cleanup_processed(arguments.days, dry_run=not arguments.yes)
+        if not arguments.yes:
+            print(
+                f"Preview: {candidates} old record(s) would be permanently removed; "
+                "rerun with --yes to confirm"
+            )
+            return 0
+        print(f"Removed {candidates} old records")
         return 0
     return 1
 

@@ -13,7 +13,7 @@ from paths import config_path, data_dir, secure_write_json
 from process_lock import process_lock
 
 
-CONFIG_VERSION = 10
+CONFIG_VERSION = 12
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": CONFIG_VERSION,
     "setup": {
@@ -50,6 +50,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "cli_profile": "",
         "expected_user_open_id": "",
         "manager_open_id": "",
+        "manager_access": "undecided",
+        "manager_access_base_name": "",
+        "manager_access_table_name": "",
         "base_token": "",
         "table_id": "",
         "provisioning": "",
@@ -185,6 +188,19 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
                 merged["feishu"]["destination"] = "skip"
             elif bool(merged["feishu"].get("enabled")):
                 merged["feishu"]["destination"] = "existing"
+        # Version 11 stored an unscoped manager approval. It cannot be safely
+        # reused for an arbitrary future Base/table, so migrate it to a fresh
+        # decision instead of rejecting the whole configuration.
+        raw_version = merged.get("version", 1)
+        if (
+            isinstance(raw_version, int)
+            and not isinstance(raw_version, bool)
+            and raw_version < 12
+            and merged["feishu"].get("manager_access") == "approved"
+        ):
+            merged["feishu"]["manager_access"] = "undecided"
+            merged["feishu"]["manager_access_base_name"] = ""
+            merged["feishu"]["manager_access_table_name"] = ""
     return merged
 
 
@@ -228,6 +244,8 @@ def _validate_feishu(feishu: Any) -> None:
         "cli_profile",
         "expected_user_open_id",
         "manager_open_id",
+        "manager_access_base_name",
+        "manager_access_table_name",
         "base_token",
         "table_id",
         "provisioning",
@@ -235,6 +253,24 @@ def _validate_feishu(feishu: Any) -> None:
     ):
         if not isinstance(feishu.get(key), str):
             raise ConfigError(f"feishu.{key} must be a string")
+    if feishu.get("manager_access") not in {"undecided", "approved", "declined"}:
+        raise ConfigError(
+            "feishu.manager_access must be undecided, approved, or declined"
+        )
+    manager_base_name = feishu["manager_access_base_name"].strip()
+    manager_table_name = feishu["manager_access_table_name"].strip()
+    if feishu["manager_access"] == "approved" and not (
+        manager_base_name and manager_table_name
+    ):
+        raise ConfigError(
+            "approved manager access requires Base and table names"
+        )
+    if feishu["manager_access"] != "approved" and (
+        manager_base_name or manager_table_name
+    ):
+        raise ConfigError(
+            "manager access names require manager_access=approved"
+        )
     if feishu["binding_mode"] not in {"", "agent", "existing", "dedicated"}:
         raise ConfigError(
             "feishu.binding_mode must be agent, existing, dedicated, or empty"
@@ -554,6 +590,7 @@ def redacted_config(config: dict[str, Any]) -> dict[str, Any]:
                 validated["feishu"]["expected_user_open_id"]
             ),
             "manager_configured": bool(validated["feishu"]["manager_open_id"]),
+            "manager_access": validated["feishu"]["manager_access"],
             "target_configured": bool(
                 validated["feishu"]["base_token"]
                 and validated["feishu"]["table_id"]

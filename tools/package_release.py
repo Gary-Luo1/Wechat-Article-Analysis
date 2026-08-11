@@ -22,6 +22,7 @@ TOP_FILES = (
     "install.ps1",
 )
 SKILL_SUFFIXES = {".md", ".txt", ".py", ".sh", ".ps1", ".yaml", ".yml"}
+LEGACY_RUNTIME_FILES = {"init_config.py", "lark_cli.py"}
 
 
 def release_files() -> list[Path]:
@@ -34,6 +35,7 @@ def release_files() -> list[Path]:
         for path in SKILL.rglob("*")
         if path.is_file()
         and path.suffix.lower() in SKILL_SUFFIXES
+        and path.name not in LEGACY_RUNTIME_FILES
         and "__pycache__" not in path.parts
         and ".pytest_cache" not in path.parts
     )

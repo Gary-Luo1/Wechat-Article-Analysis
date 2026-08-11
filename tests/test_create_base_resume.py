@@ -29,10 +29,13 @@ def _configured(monkeypatch: pytest.MonkeyPatch, home) -> None:
     config["feishu"].update(
         {
             "destination": "create",
-            "identity": "bot",
+            "identity": "user",
+            "binding_mode": "existing",
             "expected_app_id": "cli_example123",
             "cli_profile": "wechat-article-profile",
-            "manager_open_id": "ou_manager",
+            "manager_access": "approved",
+            "manager_access_base_name": "公众号文章",
+            "manager_access_table_name": "文章列表",
         }
     )
     save_config(config)
@@ -48,13 +51,13 @@ def _created_payload():
     }
 
 
-def test_feishu_create_base_resumes_after_grant_failure(tmp_path, monkeypatch, capsys):
+def test_feishu_create_base_resumes_after_preflight_failure(tmp_path, monkeypatch, capsys):
     import manage
     from bitable_client import LarkCLIError
     from config_store import load_config
 
     _configured(monkeypatch, tmp_path / "state")
-    calls = {"create": 0, "grant": 0}
+    calls = {"create": 0, "preflight": 0}
     monkeypatch.setattr(manage, "verify_feishu_identity", lambda *a, **k: {"status": "ready"})
 
     def create_standard_base(*args, **kwargs):
@@ -63,21 +66,18 @@ def test_feishu_create_base_resumes_after_grant_failure(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(manage, "create_standard_base", create_standard_base)
 
-    def failing_grant(*args, **kwargs):
-        calls["grant"] += 1
-        raise LarkCLIError("member already exists", kind="duplicate")
-
-    monkeypatch.setattr(manage, "grant_bot_created_resource", failing_grant)
-    monkeypatch.setattr(
-        manage,
-        "preflight_feishu",
-        lambda *a, **k: {
+    def preflight(*args, **kwargs):
+        calls["preflight"] += 1
+        if calls["preflight"] == 1:
+            raise LarkCLIError("temporary preflight failure", kind="transient")
+        return {
             "mapping": {
                 "title": {"field_id": "fld_title", "name": "文章标题", "type": "text"},
                 "url": {"field_id": "fld_url", "name": "文章链接", "type": "url"},
             }
-        },
-    )
+        }
+
+    monkeypatch.setattr(manage, "preflight_feishu", preflight)
 
     assert (
         manage.main(
@@ -94,12 +94,7 @@ def test_feishu_create_base_resumes_after_grant_failure(tmp_path, monkeypatch, c
     assert saved["created_base_name"] == "公众号文章"
     assert saved["created_table_name"] == "文章列表"
 
-    # Retry: the Base must not be created twice; grant now succeeds.
-    monkeypatch.setattr(
-        manage,
-        "grant_bot_created_resource",
-        lambda *a, **k: {"ok": True},
-    )
+    # Retry: the Base must not be created twice; preflight now succeeds.
     assert (
         manage.main(
             ["feishu-create-base", "--name", "公众号文章", "--table-name", "文章列表", "--yes"]
@@ -115,7 +110,7 @@ def test_feishu_create_base_resumes_after_grant_failure(tmp_path, monkeypatch, c
     assert final["health"]["feishu"]["last_verified_at"]
 
 
-def test_feishu_create_base_resume_rejects_non_duplicate_grant_failure(
+def test_feishu_create_base_resume_rejects_preflight_permission_failure(
     tmp_path, monkeypatch, capsys
 ):
     import manage
@@ -147,7 +142,7 @@ def test_feishu_create_base_resume_rejects_non_duplicate_grant_failure(
     )
     monkeypatch.setattr(
         manage,
-        "grant_bot_created_resource",
+        "preflight_feishu",
         lambda *a, **k: (_ for _ in ()).throw(
             LarkCLIError("permission denied", kind="permission")
         ),
@@ -185,12 +180,6 @@ def test_feishu_create_base_resume_rejects_name_mismatch(tmp_path, monkeypatch, 
         "create_standard_base",
         lambda *a, **k: pytest.fail("must not create a second Base"),
     )
-    monkeypatch.setattr(
-        manage,
-        "grant_bot_created_resource",
-        lambda *a, **k: pytest.fail("must not grant on mismatch"),
-    )
-
     assert (
         manage.main(
             ["feishu-create-base", "--name", "另一个名字", "--table-name", "文章列表", "--yes"]

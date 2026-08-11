@@ -73,6 +73,8 @@ def test_unix_custom_install_path(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert (destination / "SKILL.md").is_file()
+    assert not (destination / "scripts" / "init_config.py").exists()
+    assert not (destination / "scripts" / "lark_cli.py").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX installer test")
@@ -275,7 +277,7 @@ def test_unix_wrapper_skips_python3_without_article_dependencies(tmp_path: Path)
         executable.write_text(
             "#!/usr/bin/env bash\n"
             f"printf '%s %s\\n' '{name}' \"$*\" >> {shlex_quote(str(log))}\n"
-            "if [ \"${1:-}\" = \"-c\" ] && [[ \"${2:-}\" == *\"import bs4, requests\"* ]]; then exit "
+            "if [ \"${1:-}\" = \"-c\" ] && [[ \"${2:-}\" == *\"import bs4, curl_cffi, requests\"* ]]; then exit "
             f"{dependency_exit}; fi\n"
             "if [ \"${1:-}\" = \"-c\" ]; then exit 0; fi\n"
             "exit 0\n",
@@ -296,7 +298,7 @@ def test_unix_wrapper_skips_python3_without_article_dependencies(tmp_path: Path)
     )
     assert result.returncode == 0, result.stderr
     calls = log.read_text(encoding="utf-8")
-    assert "python3 -c import bs4, requests" in calls
+    assert "python3 -c import bs4, curl_cffi, requests" in calls
     assert "python " in calls
     assert "runtime.py process --help" in calls
 

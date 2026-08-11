@@ -15,6 +15,8 @@ def test_github_source_archive_is_clean_and_self_verifying(tmp_path: Path):
         assert any(name.endswith("/tests/test_core.py") for name in names)
         assert any(name.endswith("/skills/wechat-article-subscriber/SKILL.md") for name in names)
         assert any(name.endswith("/SOURCE-MANIFEST.sha256") for name in names)
+        assert not any(name.endswith("/scripts/init_config.py") for name in names)
+        assert not any(name.endswith("/scripts/lark_cli.py") for name in names)
         assert not any(
             forbidden in name
             for name in names
@@ -35,3 +37,7 @@ def test_portable_release_archive_has_a_checksum(tmp_path: Path):
 
     assert archive.is_file()
     assert checksum.read_text(encoding="ascii").endswith(f"  {archive.name}\n")
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+        assert not any(name.endswith("/scripts/init_config.py") for name in names)
+        assert not any(name.endswith("/scripts/lark_cli.py") for name in names)
