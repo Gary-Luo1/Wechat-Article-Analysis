@@ -72,7 +72,7 @@ STEP_LABELS = {
 
 ACTION_LABELS = {
     "ask_user_for_feishu_destination": "选择跳过飞书、映射现有多维表格或创建新表",
-    "import_current_feishu_bot_context": "从当前飞书机器人会话导入 App ID 和发送者 Open ID",
+    "import_current_feishu_bot_context": "从当前飞书机器人会话验证 App ID 和发送者上下文",
     "bind_detected_feishu_bot": "绑定当前飞书会话的机器人应用",
     "ask_user_to_choose_chat_or_local_file": "选择在聊天中配置，或编辑本地配置文件",
     "repair_local_config_file": "修复本地配置文件中的 JSON 或字段错误",
@@ -89,7 +89,6 @@ ACTION_LABELS = {
     "check_or_install_lark_cli": "检查或安装兼容的飞书 CLI",
     "install_compatible_lark_cli": "安装兼容的飞书 CLI 版本",
     "authorize_and_run_feishu_check": "完成飞书只读检查",
-    "resolve_and_save_feishu_manager": "确认接收机器人文件管理权限的飞书用户",
     "select_feishu_app": "选择并固定本技能要使用的飞书 App ID",
     "configure_private_lark_profile": "在技能私有目录中配置已选飞书应用",
     "provision_configured_feishu_base": "自动创建并验证已批准的飞书多维表格",
@@ -104,10 +103,24 @@ def _authorization(config: dict[str, Any]) -> dict[str, Any]:
     return config["setup"]["feishu_authorization"]
 
 
+def _set_manager_access(
+    config: dict[str, Any],
+    access: str,
+    *,
+    base_name: str = "",
+    table_name: str = "",
+) -> None:
+    config["feishu"].update(
+        {
+            "manager_access": access,
+            "manager_access_base_name": base_name,
+            "manager_access_table_name": table_name,
+        }
+    )
+
+
 def _reset_manager_access(config: dict[str, Any]) -> None:
-    config["feishu"]["manager_access"] = "undecided"
-    config["feishu"]["manager_access_base_name"] = ""
-    config["feishu"]["manager_access_table_name"] = ""
+    _set_manager_access(config, "undecided")
 
 
 def _reset_authorization(config: dict[str, Any], identity: str) -> None:
@@ -453,23 +466,10 @@ def _import_feishu_host_context(
                 "cli_profile": "",
                 "expected_user_open_id": "",
                 "manager_open_id": "",
-                "manager_access": (
-                    config["feishu"].get("manager_access", "undecided")
-                    if same_trusted_context
-                    else "undecided"
-                ),
-                "manager_access_base_name": (
-                    config["feishu"].get("manager_access_base_name", "")
-                    if same_trusted_context
-                    else ""
-                ),
-                "manager_access_table_name": (
-                    config["feishu"].get("manager_access_table_name", "")
-                    if same_trusted_context
-                    else ""
-                ),
             }
         )
+        if not same_trusted_context:
+            _reset_manager_access(config)
         config["setup"]["feishu_identity_confirmed"] = True
         _reset_authorization(config, "bot")
         current_scope = (
@@ -549,53 +549,42 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
                 "profile and never switches or edits global lark-cli profiles."
             ),
         }, "select_feishu_app"
-    if current["feishu"].get("binding_mode") == "agent":
-        expected_app_id = _expected_app_id(current)
-        if not expected_app_id:
-            return {
-                "identity_required": False,
-                "host_bot_context_required": True,
-                "global_profiles_read": False,
-                "default_profile_allowed": False,
-                "command": "manage feishu-host-context --agent-stdin",
-                "rule": (
-                    "Import the exact App ID from the trusted current Feishu event "
-                    "context. Never infer it from the active/default lark-cli profile."
-                ),
-            }, "import_current_feishu_bot_context"
-        profile_resolution = resolve_lark_profile(expected_app_id)
-        if current["feishu"].get("cli_profile") != profile_resolution["profile"]:
-            def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
-                config["feishu"]["cli_profile"] = profile_resolution["profile"]
-                return config
+    agent_binding = current["feishu"].get("binding_mode") == "agent"
+    expected_app_id = _expected_app_id(current)
+    if agent_binding and not expected_app_id:
+        return {
+            "identity_required": False,
+            "host_bot_context_required": True,
+            "global_profiles_read": False,
+            "default_profile_allowed": False,
+            "command": "manage feishu-host-context --agent-stdin",
+            "rule": (
+                "Import the exact App ID from the trusted current Feishu event "
+                "context. Never infer it from the active/default lark-cli profile."
+            ),
+        }, "import_current_feishu_bot_context"
 
-            current = modify_config(_set_profile)
-        else:
-            current = load_config()
+    profile_resolution = None
+    if expected_app_id:
+        try:
+            profile_resolution = resolve_lark_profile(expected_app_id)
+        except LarkCLIError:
+            if agent_binding:
+                raise
+
+    if (
+        profile_resolution
+        and current["feishu"].get("cli_profile") != profile_resolution["profile"]
+    ):
+        resolved_profile = str(profile_resolution["profile"])
+
+        def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
+            config["feishu"]["cli_profile"] = resolved_profile
+            return config
+
+        current = modify_config(_set_profile)
     else:
-        # Existing/dedicated bindings can also drift from lark-cli's real profile
-        # name (e.g. a profile created externally as cli_<app_id>). Resolve by
-        # App ID and self-heal when the profile is discoverable; never error when
-        # the profile is simply not initialized yet.
-        expected_app_id = _expected_app_id(current)
-        profile_resolution = None
-        if expected_app_id:
-            try:
-                profile_resolution = resolve_lark_profile(expected_app_id)
-            except LarkCLIError:
-                profile_resolution = None
-        if (
-            profile_resolution
-            and current["feishu"].get("cli_profile")
-            != profile_resolution["profile"]
-        ):
-            def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
-                config["feishu"]["cli_profile"] = profile_resolution["profile"]
-                return config
-
-            current = modify_config(_set_profile)
-        else:
-            current = load_config()
+        current = load_config()
     context = feishu_identity_context(verify=verify)
     source = _detect_agent_source()
     saved_source = str(current["feishu"].get("agent_source") or "")
@@ -705,15 +694,13 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
                     "enabled": False,
                     "expected_user_open_id": "",
                     "manager_open_id": "",
-                    "manager_access": "undecided",
-                    "manager_access_base_name": "",
-                    "manager_access_table_name": "",
                     "base_token": "",
                     "table_id": "",
                     "provisioning": "",
                     "field_mapping": {},
                 }
             )
+            _reset_manager_access(config)
         return config
 
     modify_config(mutate)
@@ -840,9 +827,10 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         base_name=base_name,
         table_name=table_name,
     )
-    preview["authorization_source"] = (
+    authorization_source = (
         "persisted_execution_policy" if policy_authorized else "current_command"
     )
+    preview["authorization_source"] = authorization_source
     if not arguments.yes and not policy_authorized:
         return {
             "preview": preview,
@@ -965,9 +953,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "field_mapping_saved": True,
         "resumed_existing": resuming,
         "provisioning_approval_consumed": policy_authorized,
-        "authorization_source": (
-            "persisted_execution_policy" if policy_authorized else "current_command"
-        ),
+        "authorization_source": authorization_source,
     }, "none"
 
 
@@ -990,22 +976,23 @@ def _feishu_manager_access(
                 "management access for a new Base requires user identity; "
                 "bot-created Base grants are disabled"
             )
-        previous = config["feishu"].get("manager_access", "undecided")
-        config["feishu"]["manager_access"] = selected
-        previous_names = (
+        previous_scope = (
+            config["feishu"].get("manager_access", "undecided"),
             config["feishu"].get("manager_access_base_name", ""),
             config["feishu"].get("manager_access_table_name", ""),
         )
-        config["feishu"]["manager_access_base_name"] = (
-            normalized_base_name if selected == "approved" else ""
+        _set_manager_access(
+            config,
+            selected,
+            base_name=normalized_base_name if selected == "approved" else "",
+            table_name=normalized_table_name if selected == "approved" else "",
         )
-        config["feishu"]["manager_access_table_name"] = (
-            normalized_table_name if selected == "approved" else ""
-        )
-        if previous != selected or previous_names != (
+        current_scope = (
+            config["feishu"]["manager_access"],
             config["feishu"]["manager_access_base_name"],
             config["feishu"]["manager_access_table_name"],
-        ):
+        )
+        if previous_scope != current_scope:
             invalidate_policy(config)
         return config
 
@@ -1511,14 +1498,12 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 "cli_profile": "",
                 "expected_user_open_id": "",
                 "manager_open_id": "",
-                "manager_access": "undecided",
-                "manager_access_base_name": "",
-                "manager_access_table_name": "",
                 "base_token": "",
                 "table_id": "",
                 "field_mapping": {},
                 "provisioning": "",
             })
+            _reset_manager_access(config)
             config["health"] = validate_config(DEFAULT_CONFIG)["health"]
             return config
 

@@ -301,9 +301,7 @@ def cmd_batch_read(limit: int) -> int:
                     pacer=pacer,
                     max_output_chars=remaining_output,
                 )
-                remaining_output = max(
-                    0, remaining_output - min(len(text), remaining_output)
-                )
+                remaining_output = max(0, remaining_output - len(text))
                 successful += 1
             except WeChatRiskControlError as exc:
                 raise BatchRiskControlError(article, successful) from exc
@@ -533,12 +531,10 @@ def cmd_sync_all(*, dry_run: bool = False) -> int:
     failures: list[Exception] = []
     for entry in entries:
         try:
-            _sync_entry(entry, dry_run=dry_run)
+            _sync_entry(entry, dry_run=True)
             print(f"Synced: {entry['article'].get('title', '')}")
         except (ConfigError, LarkCLIError, ValueError) as exc:
             failures.append(exc)
-            if not dry_run:
-                update_sync_status(entry["article"]["link"], "pending", str(exc))
             print(f"Sync failed: {entry['article'].get('title', '')}: {exc}")
     _raise_sync_failures(failures, prefix="one or more Feishu sync operations failed")
     return 0

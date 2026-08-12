@@ -138,6 +138,110 @@ def test_legacy_bot_create_state_routes_to_user_identity():
     )
 
 
+def test_existing_bot_target_never_routes_to_removed_manager_setup():
+    from config_store import DEFAULT_CONFIG
+    from execution_policy import next_stage
+
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    config["wechat"] = {"cookie": "cookie", "token": "token"}
+    config["health"]["wechat"]["last_verified_at"] = "2026-01-01T00:00:00+00:00"
+    config["setup"]["search_window_confirmed"] = True
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["setup"]["execution_policy"].update(
+        {
+            "confirmed": True,
+            "mode": "autopilot",
+            "allow_feishu_provisioning": True,
+        }
+    )
+    config["subscriptions"] = [{"name": "Example", "biz": "biz_example"}]
+    config["feishu"].update({"destination": "existing", "identity": "bot"})
+
+    assert next_stage(config, cli={"compatible": True}) == (
+        "feishu_target_missing",
+        "configure_existing_feishu_target",
+    )
+
+
+@pytest.mark.parametrize("binding_mode", ["existing", "dedicated"])
+def test_feishu_context_tolerates_missing_non_agent_profile(
+    binding_mode, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("WECHAT_ARTICLE_HOME", str(tmp_path / "state"))
+    import manage
+    from bitable_client import LarkCLIError
+    from config_store import DEFAULT_CONFIG, save_config
+
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["feishu"].update(
+        {
+            "identity": "user",
+            "binding_mode": binding_mode,
+            "expected_app_id": "cli_user123",
+            "cli_profile": "missing-profile",
+        }
+    )
+    save_config(config)
+    monkeypatch.setattr(
+        manage,
+        "resolve_lark_profile",
+        lambda *_args: (_ for _ in ()).throw(
+            LarkCLIError("profile not initialized", kind="config")
+        ),
+    )
+    monkeypatch.setattr(
+        manage,
+        "feishu_identity_context",
+        lambda **_kwargs: {
+            "app_id_unambiguous": True,
+            "user": {"available": True, "status": "ready", "token_status": "valid"},
+            "bot": {"available": False, "status": "missing"},
+        },
+    )
+
+    _context, next_action = manage._feishu_context(verify=False)
+    assert next_action == "reuse_existing_user_authorization_and_confirm_context"
+
+
+def test_feishu_context_fails_closed_when_agent_profile_cannot_be_resolved(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("WECHAT_ARTICLE_HOME", str(tmp_path / "state"))
+    import manage
+    from bitable_client import LarkCLIError
+    from config_store import DEFAULT_CONFIG, save_config
+
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["feishu"].update(
+        {
+            "destination": "existing",
+            "identity": "bot",
+            "binding_mode": "agent",
+            "agent_source": "lark-channel",
+            "expected_app_id": "cli_bot123",
+            "cli_profile": "missing-profile",
+        }
+    )
+    save_config(config)
+    monkeypatch.setattr(
+        manage,
+        "resolve_lark_profile",
+        lambda *_args: (_ for _ in ()).throw(
+            LarkCLIError("profile not initialized", kind="config")
+        ),
+    )
+    monkeypatch.setattr(
+        manage,
+        "feishu_identity_context",
+        lambda **_kwargs: pytest.fail("agent profile failure must stop first"),
+    )
+
+    with pytest.raises(LarkCLIError, match="profile not initialized"):
+        manage._feishu_context(verify=False)
+
+
 def test_agent_bot_cannot_create_base_or_grant_manager_access(
     tmp_path, monkeypatch, capsys
 ):
@@ -393,6 +497,75 @@ def test_identity_change_clears_stale_agent_manager_context(
     assert saved["expected_app_id"] == ""
     assert saved["manager_open_id"] == ""
     assert saved["manager_access"] == "undecided"
+
+
+def test_app_change_clears_manager_access_scope_and_execution_policy(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("WECHAT_ARTICLE_HOME", str(tmp_path / "state"))
+    import manage
+    from config_store import DEFAULT_CONFIG, load_config, save_config
+
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["setup"]["execution_policy"].update(
+        {
+            "confirmed": True,
+            "mode": "autopilot",
+            "allow_feishu_provisioning": True,
+            "provision_base_name": "旧 Base",
+            "provision_table_name": "旧表",
+        }
+    )
+    config["feishu"].update(
+        {
+            "destination": "create",
+            "identity": "user",
+            "binding_mode": "existing",
+            "expected_app_id": "cli_old123",
+            "cli_profile": "wechat-article-cli_old123",
+            "manager_access": "approved",
+            "manager_access_base_name": "旧 Base",
+            "manager_access_table_name": "旧表",
+        }
+    )
+    save_config(config)
+
+    manage._feishu_app("cli_new123")
+
+    saved = load_config()
+    assert saved["feishu"]["manager_access"] == "undecided"
+    assert saved["feishu"]["manager_access_base_name"] == ""
+    assert saved["feishu"]["manager_access_table_name"] == ""
+    assert saved["setup"]["execution_policy"]["confirmed"] is False
+
+
+def test_bulk_sync_preview_never_updates_sync_status(monkeypatch):
+    import process_pending
+
+    entries = [
+        {"article": _article("success"), "metadata": {}},
+        {"article": _article("failure"), "metadata": {}},
+    ]
+    calls: list[tuple[str, bool]] = []
+
+    def preview_sync(entry, *, dry_run=False):
+        suffix = entry["article"]["link"].rsplit("/", 1)[-1]
+        calls.append((suffix, dry_run))
+        if suffix == "failure":
+            raise ValueError("preview failed")
+
+    monkeypatch.setattr(process_pending, "pending_sync_entries", lambda: entries)
+    monkeypatch.setattr(process_pending, "_sync_entry", preview_sync)
+    monkeypatch.setattr(
+        process_pending,
+        "update_sync_status",
+        lambda *_args, **_kwargs: pytest.fail("preview must not update sync status"),
+    )
+
+    with pytest.raises(ValueError, match="preview failed"):
+        process_pending.cmd_sync_all(dry_run=True)
+    assert calls == [("success", True), ("failure", True)]
 
 
 def test_user_identity_can_create_exactly_approved_base_without_manager_grant(

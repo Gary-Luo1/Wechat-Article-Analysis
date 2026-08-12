@@ -130,18 +130,6 @@ def next_stage(
         if authorization["state"] == "waiting":
             return "feishu_authorization_waiting", "resume_existing_user_base_authorization"
         return "feishu_authorization_required", "run_feishu_auth_start"
-    if (
-        config["feishu"]["identity"] == "bot"
-        and policy["allow_feishu_provisioning"]
-        and not config["feishu"]["manager_open_id"]
-    ):
-        return "feishu_manager_missing", "resolve_and_save_feishu_manager"
-    if (
-        destination == "create"
-        and config["feishu"]["identity"] == "bot"
-        and config["feishu"]["manager_access"] != "approved"
-    ):
-        return "feishu_manager_access_unconfirmed", "ask_user_for_management_access"
     if not (config["feishu"]["base_token"] and config["feishu"]["table_id"]):
         if destination == "create":
             return "feishu_target_pending", "provision_configured_feishu_base"
