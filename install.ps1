@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $PSCommandPath
-$sourceDir = Join-Path $scriptRoot "skills\wechat-article-link-reviewer"
+$sourceDir = Join-Path $scriptRoot ".agents\skills\wechat-article-link-reviewer"
 
 function Find-Python {
     $candidates = @()
@@ -97,11 +97,8 @@ function Prepare-Skill([string]$Kind) {
     foreach ($fileName in @("SKILL.md", "requirements.txt")) {
         Copy-Item -LiteralPath (Join-Path $sourceDir $fileName) -Destination $temporary -Force
     }
-    foreach ($directoryName in @("agents", "scripts", "references")) {
+    foreach ($directoryName in @("scripts", "references")) {
         New-Item -ItemType Directory -Path (Join-Path $temporary $directoryName) | Out-Null
-    }
-    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceDir "agents") -File | Where-Object { $_.Extension -in @(".yaml", ".yml") }) {
-        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $temporary "agents") -Force
     }
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceDir "scripts") -File | Where-Object {
         $_.Extension -in @(".py", ".sh", ".ps1")

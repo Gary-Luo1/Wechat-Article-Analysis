@@ -1,4 +1,0 @@
-interface:
-  display_name: "WeChat Article Link Reviewer"
-  short_description: "Evaluate a supplied WeChat article link"
-  default_prompt: "Use $wechat-article-link-reviewer to fetch, review, score, and optionally sync the WeChat article link I provide. Do not discover accounts or request WeChat Cookie/token."

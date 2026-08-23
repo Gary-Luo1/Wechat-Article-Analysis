@@ -29,7 +29,7 @@ if [ -n "$DESTINATION" ] && [ "$TARGET" = "all" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_DIR="$SCRIPT_DIR/skills/wechat-article-link-reviewer"
+SOURCE_DIR="$SCRIPT_DIR/.agents/skills/wechat-article-link-reviewer"
 PYTHON_BIN=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
   command -v "$candidate" >/dev/null 2>&1 || continue
@@ -95,8 +95,7 @@ prepare_skill() {
   mkdir -p "$parent"
   temporary="$(mktemp -d "$parent/.wechat-article-link-reviewer.install.XXXXXX")"
   cp "$SOURCE_DIR/SKILL.md" "$SOURCE_DIR/requirements.txt" "$temporary/"
-  mkdir "$temporary/agents" "$temporary/scripts" "$temporary/references"
-  cp "$SOURCE_DIR/agents/"*.yaml "$temporary/agents/"
+  mkdir "$temporary/scripts" "$temporary/references"
   for script in "$SOURCE_DIR/scripts/"*.py "$SOURCE_DIR/scripts/"*.sh "$SOURCE_DIR/scripts/"*.ps1; do
     cp "$script" "$temporary/scripts/"
   done
