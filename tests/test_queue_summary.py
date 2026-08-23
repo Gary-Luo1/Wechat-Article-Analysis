@@ -85,7 +85,6 @@ def test_doctor_queue_block_uses_same_summary():
 
     config = json.loads(json.dumps(DEFAULT_CONFIG))
     config["wechat"] = {"cookie": "c", "token": "t"}
-    config["subscriptions"] = [{"name": "Example"}]
     save_config(config)
 
     add_pending([article("a"), article("b"), article("c")])

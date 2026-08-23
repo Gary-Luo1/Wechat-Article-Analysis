@@ -1,26 +1,26 @@
 # Changelog
 
-## 2.3.0 - Unreleased
+## 1.0.0 - 2026-08-23
 
-### Changed
+### Added
 
-- Keep the public product contract link-only: users provide an exact public
-  WeChat article URL for reading, scoring, local queueing, and optional sync.
-- Release archives and installers no longer ship the legacy subscription setup
-  script or a raw `lark-cli` forwarding entry.
-- Use user identity plus exact-name management approval for new Base creation;
-  portable Bot creation and manager grants are disabled because host-event
-  sender identity is not authenticated by this runtime.
-- Require `curl_cffi` at runtime so article requests do not silently fall back
-  to a plain non-browser TLS fingerprint.
-- Preview processed-record cleanup unless `--yes` is supplied, cap aggregate
-  `batch-read` content output at 200,000 characters, preserve item retryability
-  in batch errors, and mark completed Feishu review records as read.
-- Keep URL identity, local queue locking, isolated CLI profile selection, field
-  mapping, and Feishu URL-based upsert behavior shared across supported flows.
+- Review an exact public WeChat article URL supplied by the user.
+- Extract bounded article content for five-dimension Agent scoring.
+- Keep a local queue with URL identity, content fingerprints, inbox state,
+  export, and cleanup controls.
+- Optionally sync an explicitly confirmed article review to one exact Feishu
+  Base table.
+- Support existing-target binding and user-authorized Base creation without
+  exposing resource tokens.
+- Provide installers and adapters for supported Agent runtimes on POSIX and
+  Windows.
 
-### Fixed
+### Security
 
-- Stop article reads immediately on WeChat risk-control pages and HTTP 403/429.
-- Reject direct Feishu data commands that could bypass the managed identity,
-  target, confirmation, and manager-permission checks.
+- Treat article content and metadata as untrusted data.
+- Restrict article requests and redirects to `mp.weixin.qq.com/s`, with response
+  and extracted-text limits.
+- Require separate current-task authorization before every Feishu article
+  write.
+- Require Python 3.10+ and patched `curl_cffi`, `requests`, and `urllib3`
+  dependency lines.

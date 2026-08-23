@@ -8,7 +8,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills" / "wechat-article-subscriber" / "scripts"
+SCRIPTS = ROOT / "skills" / "wechat-article-link-reviewer" / "scripts"
 
 
 @pytest.fixture(autouse=True)
@@ -129,6 +129,8 @@ def test_removed_commands_are_not_exposed(capsys: pytest.CaptureFixture[str]):
     with pytest.raises(SystemExit):
         process_pending.build_parser().parse_args(["ingest", "--url", _article()["link"]])
     with pytest.raises(SystemExit):
+        process_pending.build_parser().parse_args(["done", "--index", "1"])
+    with pytest.raises(SystemExit):
         manage.build_parser().parse_args(["subscriptions", "list"])
     with pytest.raises(SystemExit):
         manage.build_parser().parse_args(
@@ -156,14 +158,6 @@ def _save_existing_feishu_config(*, min_score: float = 6.0) -> None:
     from config_store import DEFAULT_CONFIG, save_config
 
     config = json.loads(json.dumps(DEFAULT_CONFIG))
-    config["setup"]["execution_policy"].update(
-        {
-            "confirmed": True,
-            "mode": "autopilot",
-            "allow_feishu_sync": True,
-            "approved_at": "2026-01-01T00:00:00+00:00",
-        }
-    )
     config["feishu"].update(
         {
             "destination": "existing",
@@ -209,7 +203,6 @@ def test_existing_feishu_target_requires_preview_then_confirmation(
     assert saved["feishu"]["base_token"] == "bascn_new"
     assert saved["feishu"]["table_id"] == "tbl_new"
     assert saved["feishu"]["field_mapping"] == {}
-    assert saved["setup"]["execution_policy"]["confirmed"] is False
 
 
 @pytest.mark.parametrize(
@@ -218,6 +211,7 @@ def test_existing_feishu_target_requires_preview_then_confirmation(
         "http://example.feishu.cn/base/bascn_a?table=tbl_a",
         "https://feishu.cn.evil.example/base/bascn_a?table=tbl_a",
         "https://example.feishu.cn/wiki/bascn_a?table=tbl_a",
+        "https://example.feishu.cn/base/bascn_a/extra?table=tbl_a",
         "https://example.feishu.cn/base/bascn_a",
         "https://example.feishu.cn/base/bascn_a?table=tbl_a&table=tbl_b",
     ],

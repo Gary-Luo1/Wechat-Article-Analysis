@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,8 @@ from lark_runtime import (
     resolve_lark_cli,
     safe_lark_arguments,
 )
+from paths import data_dir
+from process_lock import process_lock
 from url_identity import upgrade_wechat_article_url
 
 
@@ -1037,19 +1040,14 @@ def preflight_feishu(feishu: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def upsert_article(
+def _upsert_record(
     feishu: dict[str, Any],
-    article: dict[str, Any],
-    metadata: dict[str, Any],
+    record: dict[str, Any],
     *,
-    dry_run: bool = False,
+    url_field: str,
+    identity: str,
+    dry_run: bool,
 ) -> None:
-    check = preflight_feishu(feishu)
-    mapping = check["resolved"]
-    record = build_mapped_record(article, metadata, mapping)
-    url_target = mapping["url"]
-    url_field = url_target["field_id"] or url_target["name"]
-    identity = check["identity"]
     record_id = find_record_by_url(
         feishu["base_token"],
         feishu["table_id"],
@@ -1075,4 +1073,51 @@ def upsert_article(
         args.extend(["--record-id", record_id])
     if dry_run:
         args.append("--dry-run")
-    _run_lark(args)
+    try:
+        _run_lark(args, retries=3 if record_id or dry_run else 1)
+    except LarkCLIError as exc:
+        if record_id or dry_run or not exc.retryable:
+            raise
+        # A create may have succeeded even when its response was lost. Never
+        # replay it blindly: query by the stable URL and update only if found.
+        recovered_id = find_record_by_url(
+            feishu["base_token"],
+            feishu["table_id"],
+            str(record[url_field]),
+            url_field,
+            identity=identity,
+        )
+        if not recovered_id:
+            raise
+        _run_lark([*args, "--record-id", recovered_id])
+
+
+def upsert_article(
+    feishu: dict[str, Any],
+    article: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> None:
+    check = preflight_feishu(feishu)
+    mapping = check["resolved"]
+    record = build_mapped_record(article, metadata, mapping)
+    url_target = mapping["url"]
+    url_field = url_target["field_id"] or url_target["name"]
+    identity = check["identity"]
+    lock_identity = "\0".join(
+        (
+            str(feishu["base_token"]),
+            str(feishu["table_id"]),
+            str(record[url_field]),
+        )
+    )
+    lock_name = hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()[:24]
+    with process_lock(data_dir() / f"feishu-upsert-{lock_name}.lock"):
+        _upsert_record(
+            feishu,
+            record,
+            url_field=url_field,
+            identity=identity,
+            dry_run=dry_run,
+        )

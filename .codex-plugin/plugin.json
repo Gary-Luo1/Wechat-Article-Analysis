@@ -1,6 +1,6 @@
 {
-  "name": "wechat-article-subscriber",
-  "version": "2.3.0",
+  "name": "wechat-article-link-reviewer",
+  "version": "1.0.0",
   "description": "Review user-supplied WeChat article links and optionally sync results to Feishu Base.",
   "author": "Gray",
   "repository": "https://github.com/Gary-Luo1/wechat-article-link-reviewer",
@@ -14,6 +14,6 @@
     "developerName": "Gray",
     "category": "Productivity",
     "capabilities": ["local-files", "network", "feishu-sync"],
-    "defaultPrompt": "Help me review a supplied WeChat article link and optionally save the result to Feishu Base."
+    "defaultPrompt": "Review only the WeChat article link I supply. Do not discover accounts or request WeChat Cookie/token, and ask before writing this article to Feishu Base."
   }
 }

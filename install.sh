@@ -29,19 +29,19 @@ if [ -n "$DESTINATION" ] && [ "$TARGET" = "all" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_DIR="$SCRIPT_DIR/skills/wechat-article-subscriber"
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="$(command -v python3)"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="$(command -v python)"
-else
-  echo "Python 3.9+ is required" >&2
+SOURCE_DIR="$SCRIPT_DIR/skills/wechat-article-link-reviewer"
+PYTHON_BIN=""
+for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  resolved="$(command -v "$candidate")"
+  "$resolved" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || continue
+  PYTHON_BIN="$resolved"
+  break
+done
+if [ -z "$PYTHON_BIN" ]; then
+  echo "Python 3.10+ is required" >&2
   exit 1
 fi
-"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' || {
-  echo "Python 3.9+ is required" >&2
-  exit 1
-}
 
 target_parent() {
   local profile_root="${WECHAT_SKILL_INSTALL_ROOT:-$HOME}"
@@ -64,9 +64,9 @@ data_home() {
   if [ -n "${WECHAT_ARTICLE_HOME:-}" ]; then
     "$PYTHON_BIN" -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$WECHAT_ARTICLE_HOME"
   elif [ "$(uname -s)" = "Darwin" ]; then
-    printf '%s\n' "$HOME/Library/Application Support/wechat-article-subscriber"
+    printf '%s\n' "$HOME/Library/Application Support/wechat-article-link-reviewer"
   else
-    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/wechat-article-subscriber"
+    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/wechat-article-link-reviewer"
   fi
 }
 
@@ -90,17 +90,14 @@ prepare_skill() {
     parent="$(dirname "$destination")"
   else
     parent="$(target_parent "$kind")"
-    destination="$parent/wechat-article-subscriber"
+    destination="$parent/wechat-article-link-reviewer"
   fi
   mkdir -p "$parent"
-  temporary="$(mktemp -d "$parent/.wechat-article-subscriber.install.XXXXXX")"
+  temporary="$(mktemp -d "$parent/.wechat-article-link-reviewer.install.XXXXXX")"
   cp "$SOURCE_DIR/SKILL.md" "$SOURCE_DIR/requirements.txt" "$temporary/"
   mkdir "$temporary/agents" "$temporary/scripts" "$temporary/references"
   cp "$SOURCE_DIR/agents/"*.yaml "$temporary/agents/"
   for script in "$SOURCE_DIR/scripts/"*.py "$SOURCE_DIR/scripts/"*.sh "$SOURCE_DIR/scripts/"*.ps1; do
-    case "$(basename "$script")" in
-      init_config.py|lark_cli.py) continue ;;
-    esac
     cp "$script" "$temporary/scripts/"
   done
   cp "$SOURCE_DIR/references/"*.md "$temporary/references/"
@@ -141,6 +138,13 @@ VENV_BACKUP=""
 VENV_HAD_EXISTING=0
 VENV_COMMITTED=0
 
+interrupted() {
+  trap - INT TERM
+  rollback
+  exit 130
+}
+trap interrupted INT TERM
+
 for kind in "${TARGETS[@]}"; do prepare_skill "$kind"; done
 
 if [ "$INSTALL_DEPS" -eq 1 ]; then
@@ -180,7 +184,7 @@ if [ "$INSTALL_DEPS" -eq 1 ]; then
   VENV_COMMITTED=1
   echo "Created isolated runtime at $VENV_DIR"
 else
-  echo "Skipped dependency installation; commands other than setup require requests, beautifulsoup4, and curl_cffi in the selected Python runtime."
+  echo "Skipped venv creation; process and manage require requests, beautifulsoup4, and curl_cffi in the selected Python runtime."
 fi
 
 for ((index=0; index<${#KINDS[@]}; index++)); do
@@ -191,5 +195,5 @@ if ! command -v lark-cli >/dev/null 2>&1; then
   echo "Feishu sync is disabled until @larksuite/cli is installed and authenticated."
 fi
 echo "Installation complete. Restart or open your Agent, then say:"
-echo '  "配置微信公众号文章订阅"'
-echo "The Agent will guide configuration in dialogue; do not paste credentials into shell arguments."
+echo '  "审阅这篇微信公众号文章：https://mp.weixin.qq.com/s/..."'
+echo "The Agent will process only the supplied link and ask before any Feishu write."

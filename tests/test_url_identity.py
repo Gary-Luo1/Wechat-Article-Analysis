@@ -80,6 +80,13 @@ class TestNormalize:
             "https://mp.weixin.qq.com/s/abc?foo=bar"
         ) == "https://mp.weixin.qq.com/s/abc"
 
+    def test_http_and_https_share_one_queue_identity(self):
+        from url_identity import normalize_article_url
+
+        assert normalize_article_url(
+            "http://mp.weixin.qq.com/s/abc"
+        ) == normalize_article_url("https://mp.weixin.qq.com/s/abc")
+
     def test_rejects_empty_or_bad_urls(self):
         from url_identity import normalize_article_url
 

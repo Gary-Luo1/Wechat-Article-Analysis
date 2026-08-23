@@ -15,7 +15,7 @@ import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills" / "wechat-article-subscriber" / "scripts"
+SCRIPTS = ROOT / "skills" / "wechat-article-link-reviewer" / "scripts"
 
 
 @pytest.fixture(autouse=True)
@@ -61,175 +61,31 @@ def test_feishu_target_owns_cli_check_preflight_and_sync_calls():
 
 
 class TestConfig:
-    def test_save_load_and_defaults(self):
-        from config_store import load_config, save_config
-
-        config = {
-            "wechat": {"cookie": "secret", "token": "123"},
-            "subscriptions": [{"name": "Example"}],
-            "feishu": {"base_token": "", "table_id": ""},
-            "settings": {
-                "check_hours": 24,
-                "request_delay": 0,
-                "max_articles_per_account": 10,
-                "content_dedup": True,
-                "min_score": 6,
-            },
-        }
-        path = save_config(config)
-        assert path.exists()
-        assert load_config(require_wechat=True)["wechat"]["token"] == "123"
-
-    def test_rejects_bad_range(self):
-        from config_store import DEFAULT_CONFIG, ConfigError, validate_config
-
-        config = json.loads(json.dumps(DEFAULT_CONFIG))
-        config["settings"]["min_score"] = 100
-        with pytest.raises(ConfigError):
-            validate_config(config)
-
-    def test_agent_dialogue_payload_saves_without_echoing_secrets(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ):
-        import init_config
-        from config_store import load_config
-
-        payload = {
-            "wechat_cookie": "sensitive-cookie-value",
-            "wechat_token": "sensitive-token-value",
-            "subscriptions": ["Account One", {"name": "Account Two", "alias": "two"}],
-            "feishu_base_token": "base-token",
-            "feishu_table_id": "table-id",
-        }
-        monkeypatch.setattr(init_config.sys, "stdin", io.StringIO(json.dumps(payload)))
-
-        assert init_config.main(["--agent-stdin"]) == 0
-        captured = capsys.readouterr()
-        assert "sensitive-cookie-value" not in captured.out + captured.err
-        assert "sensitive-token-value" not in captured.out + captured.err
-        config = load_config(require_wechat=True)
-        assert config["wechat"]["cookie"] == "sensitive-cookie-value"
-        assert [item["name"] for item in config["subscriptions"]] == [
-            "Account One",
-            "Account Two",
-        ]
-        assert config["feishu"]["enabled"] is True
-        assert config["feishu"]["identity"] == "user"
-        assert config["feishu"]["base_token"] == "base-token"
-        assert config["feishu"]["field_mapping"]["url"]["name"] == "文章链接"
-
-    def test_feishu_only_dialogue_merges_without_wechat_secrets(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        import init_config
+    def test_save_load_reviewer_config(self):
         from config_store import DEFAULT_CONFIG, load_config, save_config
 
         config = json.loads(json.dumps(DEFAULT_CONFIG))
-        config["wechat"] = {"cookie": "keep-cookie", "token": "123"}
-        config["subscriptions"] = [{"name": "Account"}]
-        save_config(config)
-        payload = {
-            "enabled": True,
-            "identity": "user",
-            "expected_app_id": "cli_expected",
-            "base_token": "base",
-            "table_id": "tbl1",
-            "provisioning": "existing",
-            "schema_policy": "mapped",
-            "field_mapping": {
-                "title": {"field_id": "fld_title", "name": "标题"},
-                "url": {"field_id": "fld_url", "name": "链接"},
-            },
-        }
-        monkeypatch.setattr(init_config.sys, "stdin", io.StringIO(json.dumps(payload)))
+        config["settings"]["min_score"] = 7
+        path = save_config(config)
+        assert path.exists()
+        loaded = load_config()
+        assert loaded["settings"]["min_score"] == 7
+        assert "wechat" not in loaded
+        assert "subscriptions" not in loaded
+        assert "execution_policy" not in loaded["setup"]
 
-        assert init_config.main(["--feishu-agent-stdin"]) == 0
-        saved = load_config(require_wechat=True)
-        assert saved["wechat"]["cookie"] == "keep-cookie"
-        assert saved["feishu"]["expected_app_id"] == "cli_expected"
-        assert saved["feishu"]["field_mapping"]["title"]["field_id"] == "fld_title"
+    def test_unrelated_legacy_fields_are_not_imported(self):
+        from config_store import validate_config
 
-    def test_agent_dialogue_payload_rejects_partial_feishu_config(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ):
-        import init_config
-        from paths import config_path
-
-        payload = {
-            "wechat_cookie": "cookie",
-            "wechat_token": "token",
-            "subscriptions": ["Account"],
-            "feishu_base_token": "base-only",
-            "feishu_table_id": "",
-        }
-        monkeypatch.setattr(init_config.sys, "stdin", io.StringIO(json.dumps(payload)))
-
-        assert init_config.main(["--agent-stdin"]) == 1
-        assert not config_path().exists()
-        captured = capsys.readouterr()
-        assert "base-only" not in captured.out + captured.err
-
-    def test_runtime_forwards_agent_configuration_on_stdin(self):
-        payload = {
-            "wechat_cookie": "runtime-cookie-secret",
-            "wechat_token": "runtime-token-secret",
-            "subscriptions": ["Runtime Account"],
-            "feishu_base_token": "",
-            "feishu_table_id": "",
-        }
-        result = subprocess.run(
-            [sys.executable, str(SCRIPTS / "runtime.py"), "setup", "--agent-stdin"],
-            input=json.dumps(payload),
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=os.environ.copy(),
-        )
-
-        assert result.returncode == 2
-        assert "runtime-cookie-secret" not in result.stdout + result.stderr
-        assert "runtime-token-secret" not in result.stdout + result.stderr
-        assert "usage: runtime.py {process|manage}" in result.stderr
-
-    def test_agent_file_fallback_is_scoped_consumed_and_redacted(
-        self, capsys: pytest.CaptureFixture[str]
-    ):
-        import init_config
-        from config_store import load_config
-        from paths import data_dir
-
-        assert init_config.main(["--prepare-agent-file"]) == 0
-        inbox = Path(capsys.readouterr().out.strip())
-        assert inbox.parent == data_dir()
-        payload = {
-            "wechat_cookie": "inbox-cookie-secret",
-            "wechat_token": "inbox-token-secret",
-            "subscriptions": ["Inbox Account"],
-            "feishu_base_token": "",
-            "feishu_table_id": "",
-        }
-        inbox.write_text(json.dumps(payload), encoding="utf-8")
-
-        assert init_config.main(["--agent-file", str(inbox)]) == 0
-        captured = capsys.readouterr()
-        assert "inbox-cookie-secret" not in captured.out + captured.err
-        assert "inbox-token-secret" not in captured.out + captured.err
-        assert not inbox.exists()
-        assert load_config(require_wechat=True)["subscriptions"][0]["name"] == "Inbox Account"
-
-    def test_agent_file_fallback_rejects_and_preserves_unscoped_file(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ):
-        import init_config
-
-        outside = tmp_path / ".agent-config-outside.json"
-        outside.write_text('{"secret":"must-not-be-read"}', encoding="utf-8")
-
-        assert init_config.main(["--agent-file", str(outside)]) == 1
-        assert outside.exists()
-        captured = capsys.readouterr()
-        assert "must-not-be-read" not in captured.out + captured.err
+        migrated = validate_config({
+            "wechat": {"cookie": "secret", "token": "123"},
+            "subscriptions": [{"name": "Example"}],
+            "setup": {"search_window_confirmed": True, "execution_policy": {}},
+        })
+        assert "wechat" not in migrated
+        assert "subscriptions" not in migrated
+        assert "search_window_confirmed" not in migrated["setup"]
+        assert "execution_policy" not in migrated["setup"]
 
 
 class TestQueue:
@@ -251,6 +107,19 @@ class TestQueue:
         second = article("1", query="&scene=2")
         assert add_pending([first, second]) == 1
         assert len(get_pending()) == 1
+
+    def test_queue_rejects_non_wechat_urls(self):
+        from queue_helpers import add_pending
+
+        with pytest.raises(ValueError, match="mp.weixin.qq.com/s"):
+            add_pending([{**article("a"), "link": "https://example.com/s/a"}])
+
+    def test_queue_canonicalizes_http_wechat_urls(self):
+        from queue_helpers import add_pending, get_pending
+
+        source = {**article("a"), "link": "http://mp.weixin.qq.com/s/a"}
+        assert add_pending([source]) == 1
+        assert get_pending()[0]["link"] == "https://mp.weixin.qq.com/s/a"
 
     def test_content_dedup_is_off_by_default(self):
         from queue_helpers import add_pending, get_pending

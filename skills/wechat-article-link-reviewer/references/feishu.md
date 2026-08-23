@@ -25,15 +25,32 @@ tokens.
 manage feishu-destination --mode existing|create|skip
 manage feishu-target --url-stdin
 manage feishu-identity --as user
+manage feishu-app --app-id <APP_ID>
+manage feishu-local-profile scan
+manage feishu-local-profile import
+manage feishu-local-profile import --yes
+manage feishu-auth status
+manage feishu-auth start
+manage feishu-auth complete
 manage feishu-manager-access --mode approve --base-name <BASE_NAME> --table-name <TABLE_NAME>
 manage feishu-context --verify
 manage feishu-create-base --name <BASE_NAME> --table-name <TABLE_NAME> --yes
 process feishu-check --save-mapping
 ```
 
+Follow the JSON `next_action` returned by each setup command. App selection,
+Skill-owned profile initialization, and user authorization must be completed
+when requested before Base creation or the first user-identity write. Profile
+import and Base creation provide a preview before the `--yes` form applies the
+change. Install a compatible `lark-cli` separately when the runtime reports
+`LARK_MISSING_CLI`; the Skill does not install it automatically.
+
 For an existing Base only, `manage feishu-host-context --agent-stdin` can bind a
 Bot from the current host event but never authorizes a
 resource grant. The sender Open ID is validated as host input but is not persisted.
+On hosts where trusted stdin forwarding is unavailable, use
+`manage feishu-host-context --agent-file <TRUSTED_CONTEXT.json>` with a
+host-generated current-event file; never ask the user to compose that file.
 The separate manager-access command records the user's choice
 for user-identity Base creation. Approval is scoped to the exact Base/table names and is cleared when the
 destination, identity, or App binding changes.

@@ -73,6 +73,8 @@ def normalize_article_url(url: str) -> str:
     host = (parsed.hostname or "").lower()
     if scheme not in {"http", "https"} or not host:
         raise ValueError("article URL must use http or https")
+    if host == ALLOWED_HOST:
+        scheme = "https"
     port = parsed.port
     netloc = host if port is None else f"{host}:{port}"
     path = re.sub(r"/{2,}", "/", parsed.path or "/").rstrip("/") or "/"

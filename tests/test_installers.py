@@ -9,7 +9,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_NAME = "wechat-article-subscriber"
+SKILL_NAME = "wechat-article-link-reviewer"
 
 
 def _existing_install(root: Path, directory: str) -> Path:
@@ -45,7 +45,7 @@ def test_unix_dependency_failure_preserves_existing_install(tmp_path: Path):
 
     assert result.returncode != 0
     assert (destination / "SENTINEL.txt").read_text(encoding="utf-8") == "previous-version"
-    assert not list(destination.parent.glob(".wechat-article-subscriber.install.*"))
+    assert not list(destination.parent.glob(".wechat-article-link-reviewer.install.*"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX custom installer test")
@@ -181,7 +181,7 @@ def test_powershell_dependency_failure_preserves_existing_install(tmp_path: Path
 
     assert result.returncode != 0
     assert (destination / "SENTINEL.txt").read_text(encoding="utf-8") == "previous-version"
-    assert not list(destination.parent.glob(".wechat-article-subscriber.install.*"))
+    assert not list(destination.parent.glob(".wechat-article-link-reviewer.install.*"))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows launcher test")
@@ -261,6 +261,43 @@ def test_unix_wrapper_uses_a_python_with_article_dependencies(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     calls = log.read_text(encoding="utf-8")
     assert "-c import sys" in calls
+    assert "runtime.py process --help" in calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher test")
+def test_unix_wrapper_prefers_installed_isolated_runtime(tmp_path: Path):
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is unavailable")
+    state_home = tmp_path / "state"
+    venv_python = state_home / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    log = tmp_path / "venv-python.log"
+    venv_python.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$*\" >> {shlex_quote(str(log))}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    venv_python.chmod(0o755)
+    environment = os.environ.copy()
+    environment["WECHAT_ARTICLE_HOME"] = str(state_home)
+
+    result = subprocess.run(
+        [bash, str(ROOT / "skills" / SKILL_NAME / "scripts" / "run.sh"), "process", "--help"],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8")
+    assert "-c import sys" in calls
+    assert "-c import bs4, curl_cffi, requests" in calls
     assert "runtime.py process --help" in calls
 
 

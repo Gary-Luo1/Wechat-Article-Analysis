@@ -120,49 +120,6 @@ def test_bot_host_context_is_rejected_for_create_destination(
     assert load_config() == before
 
 
-def test_legacy_bot_create_state_routes_to_user_identity():
-    from config_store import DEFAULT_CONFIG
-    from execution_policy import next_stage
-
-    config = json.loads(json.dumps(DEFAULT_CONFIG))
-    config["wechat"] = {"cookie": "cookie", "token": "token"}
-    config["health"]["wechat"]["last_verified_at"] = "2026-01-01T00:00:00+00:00"
-    config["setup"]["search_window_confirmed"] = True
-    config["setup"]["feishu_identity_confirmed"] = True
-    config["subscriptions"] = [{"name": "Example", "biz": "biz_example"}]
-    config["feishu"].update({"destination": "create", "identity": "bot"})
-
-    assert next_stage(config, cli={"compatible": True}) == (
-        "feishu_create_requires_user_identity",
-        "switch_to_user_identity",
-    )
-
-
-def test_existing_bot_target_never_routes_to_removed_manager_setup():
-    from config_store import DEFAULT_CONFIG
-    from execution_policy import next_stage
-
-    config = json.loads(json.dumps(DEFAULT_CONFIG))
-    config["wechat"] = {"cookie": "cookie", "token": "token"}
-    config["health"]["wechat"]["last_verified_at"] = "2026-01-01T00:00:00+00:00"
-    config["setup"]["search_window_confirmed"] = True
-    config["setup"]["feishu_identity_confirmed"] = True
-    config["setup"]["execution_policy"].update(
-        {
-            "confirmed": True,
-            "mode": "autopilot",
-            "allow_feishu_provisioning": True,
-        }
-    )
-    config["subscriptions"] = [{"name": "Example", "biz": "biz_example"}]
-    config["feishu"].update({"destination": "existing", "identity": "bot"})
-
-    assert next_stage(config, cli={"compatible": True}) == (
-        "feishu_target_missing",
-        "configure_existing_feishu_target",
-    )
-
-
 @pytest.mark.parametrize("binding_mode", ["existing", "dedicated"])
 def test_feishu_context_tolerates_missing_non_agent_profile(
     binding_mode, tmp_path, monkeypatch
@@ -499,7 +456,7 @@ def test_identity_change_clears_stale_agent_manager_context(
     assert saved["manager_access"] == "undecided"
 
 
-def test_app_change_clears_manager_access_scope_and_execution_policy(
+def test_app_change_clears_manager_access_scope(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("WECHAT_ARTICLE_HOME", str(tmp_path / "state"))
@@ -508,15 +465,6 @@ def test_app_change_clears_manager_access_scope_and_execution_policy(
 
     config = json.loads(json.dumps(DEFAULT_CONFIG))
     config["setup"]["feishu_identity_confirmed"] = True
-    config["setup"]["execution_policy"].update(
-        {
-            "confirmed": True,
-            "mode": "autopilot",
-            "allow_feishu_provisioning": True,
-            "provision_base_name": "旧 Base",
-            "provision_table_name": "旧表",
-        }
-    )
     config["feishu"].update(
         {
             "destination": "create",
@@ -537,7 +485,6 @@ def test_app_change_clears_manager_access_scope_and_execution_policy(
     assert saved["feishu"]["manager_access"] == "undecided"
     assert saved["feishu"]["manager_access_base_name"] == ""
     assert saved["feishu"]["manager_access_table_name"] == ""
-    assert saved["setup"]["execution_policy"]["confirmed"] is False
 
 
 def test_bulk_sync_preview_never_updates_sync_status(monkeypatch):
@@ -566,6 +513,48 @@ def test_bulk_sync_preview_never_updates_sync_status(monkeypatch):
     with pytest.raises(ValueError, match="preview failed"):
         process_pending.cmd_sync_all(dry_run=True)
     assert calls == [("success", True), ("failure", True)]
+
+
+def test_bulk_sync_without_dry_run_is_rejected(caplog):
+    import process_pending
+
+    assert process_pending.main(["sync-feishu", "--all"]) == 1
+    assert "preview-only" in caplog.text
+
+
+def test_lost_create_response_recovers_by_url_without_blind_replay(monkeypatch):
+    import bitable_client
+
+    lookups = iter([None, "rec_recovered"])
+    monkeypatch.setattr(
+        bitable_client,
+        "find_record_by_url",
+        lambda *_args, **_kwargs: next(lookups),
+    )
+    calls = []
+
+    def run_lark(args, *, retries=3):
+        calls.append((list(args), retries))
+        if len(calls) == 1:
+            raise bitable_client.LarkCLIError(
+                "response lost",
+                kind="transient",
+                retryable=True,
+            )
+        return {"ok": True}
+
+    monkeypatch.setattr(bitable_client, "_run_lark", run_lark)
+    bitable_client._upsert_record(
+        {"base_token": "bas_test", "table_id": "tbl_test"},
+        {"fld_url": "https://mp.weixin.qq.com/s/example"},
+        url_field="fld_url",
+        identity="user",
+        dry_run=False,
+    )
+
+    assert calls[0][1] == 1
+    assert "--record-id" not in calls[0][0]
+    assert calls[1][0][-2:] == ["--record-id", "rec_recovered"]
 
 
 def test_user_identity_can_create_exactly_approved_base_without_manager_grant(

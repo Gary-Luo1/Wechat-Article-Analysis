@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-APP_NAME = "wechat-article-subscriber"
+APP_NAME = "wechat-article-link-reviewer"
 
 
 def data_dir() -> Path:

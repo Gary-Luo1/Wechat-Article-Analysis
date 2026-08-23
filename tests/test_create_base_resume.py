@@ -12,20 +12,7 @@ def _configured(monkeypatch: pytest.MonkeyPatch, home) -> None:
     from config_store import DEFAULT_CONFIG, save_config
 
     config = json.loads(json.dumps(DEFAULT_CONFIG))
-    config["wechat"] = {"cookie": "cookie-secret", "token": "token-secret"}
-    config["subscriptions"] = [{"name": "Example"}]
     config["setup"]["feishu_identity_confirmed"] = True
-    config["setup"]["execution_policy"].update(
-        {
-            "confirmed": True,
-            "mode": "autopilot",
-            "unlisted_publisher": "ask",
-            "allow_feishu_provisioning": True,
-            "provision_base_name": "公众号文章",
-            "provision_table_name": "文章列表",
-            "approved_at": "2026-01-01T00:00:00+00:00",
-        }
-    )
     config["feishu"].update(
         {
             "destination": "create",
@@ -106,7 +93,6 @@ def test_feishu_create_base_resumes_after_preflight_failure(tmp_path, monkeypatc
     assert calls["create"] == 1
     assert final["feishu"]["enabled"] is True
     assert final["feishu"]["field_mapping"]["title"]["field_id"] == "fld_title"
-    assert final["setup"]["execution_policy"]["allow_feishu_provisioning"] is False
     assert final["health"]["feishu"]["last_verified_at"]
 
 

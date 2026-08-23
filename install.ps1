@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $PSCommandPath
-$sourceDir = Join-Path $scriptRoot "skills\wechat-article-subscriber"
+$sourceDir = Join-Path $scriptRoot "skills\wechat-article-link-reviewer"
 
 function Find-Python {
     $candidates = @()
@@ -21,11 +21,11 @@ function Find-Python {
         $versionText = & $candidate.Source @($candidate.Prefix) -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
         if ($LASTEXITCODE -eq 0) {
             try {
-                if ([version]$versionText -ge [version]"3.9") { return $candidate }
+                if ([version]$versionText -ge [version]"3.10") { return $candidate }
             } catch { }
         }
     }
-    throw "Python 3.9+ is required (supported launchers: python or py -3)"
+    throw "Python 3.10+ is required (supported launchers: python or py -3)"
 }
 
 $pythonCommand = Find-Python
@@ -47,7 +47,7 @@ function Get-DataHome {
     }
     $appDataRoot = if ($env:APPDATA) { $env:APPDATA } else { $env:LOCALAPPDATA }
     if (-not $appDataRoot) { throw "APPDATA or LOCALAPPDATA is required" }
-    return Join-Path $appDataRoot "wechat-article-subscriber"
+    return Join-Path $appDataRoot "wechat-article-link-reviewer"
 }
 
 function Get-TargetParent([string]$Kind) {
@@ -89,9 +89,9 @@ function Prepare-Skill([string]$Kind) {
         $parent = Split-Path -Parent $destination
     } else {
         $parent = Get-TargetParent $Kind
-        $destination = Join-Path $parent "wechat-article-subscriber"
+        $destination = Join-Path $parent "wechat-article-link-reviewer"
     }
-    $temporary = Join-Path $parent ".wechat-article-subscriber.install.$([guid]::NewGuid().ToString('N'))"
+    $temporary = Join-Path $parent ".wechat-article-link-reviewer.install.$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
     New-Item -ItemType Directory -Path $temporary | Out-Null
     foreach ($fileName in @("SKILL.md", "requirements.txt")) {
@@ -104,7 +104,7 @@ function Prepare-Skill([string]$Kind) {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $temporary "agents") -Force
     }
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceDir "scripts") -File | Where-Object {
-        $_.Extension -in @(".py", ".sh", ".ps1") -and $_.Name -notin @("init_config.py", "lark_cli.py")
+        $_.Extension -in @(".py", ".sh", ".ps1")
     }) {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $temporary "scripts") -Force
     }
@@ -191,11 +191,11 @@ foreach ($item in $prepared) {
 }
 
 if ($NoDeps) {
-    Write-Host "Skipped dependency installation; commands other than setup require requests, beautifulsoup4, and curl_cffi in the selected Python runtime."
+    Write-Host "Skipped venv creation; process and manage require requests, beautifulsoup4, and curl_cffi in the selected Python runtime."
 }
 if (-not (Get-Command lark-cli -ErrorAction SilentlyContinue)) {
     Write-Host "Feishu sync is disabled until @larksuite/cli is installed and authenticated."
 }
 Write-Host "Installation complete. Restart or open your Agent, then say:"
-Write-Host '  "配置微信公众号文章订阅"'
-Write-Host "The Agent will guide configuration in dialogue; do not paste credentials into shell arguments."
+Write-Host '  "审阅这篇微信公众号文章：https://mp.weixin.qq.com/s/..."'
+Write-Host "The Agent will process only the supplied link and ask before any Feishu write."

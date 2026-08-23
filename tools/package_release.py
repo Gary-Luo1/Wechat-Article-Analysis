@@ -10,7 +10,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "wechat-article-subscriber"
+SKILL = ROOT / "skills" / "wechat-article-link-reviewer"
 TOP_FILES = (
     "LICENSE",
     "README.md",
@@ -22,7 +22,6 @@ TOP_FILES = (
     "install.ps1",
 )
 SKILL_SUFFIXES = {".md", ".txt", ".py", ".sh", ".ps1", ".yaml", ".yml"}
-LEGACY_RUNTIME_FILES = {"init_config.py", "lark_cli.py"}
 
 
 def release_files() -> list[Path]:
@@ -35,7 +34,6 @@ def release_files() -> list[Path]:
         for path in SKILL.rglob("*")
         if path.is_file()
         and path.suffix.lower() in SKILL_SUFFIXES
-        and path.name not in LEGACY_RUNTIME_FILES
         and "__pycache__" not in path.parts
         and ".pytest_cache" not in path.parts
     )
@@ -49,8 +47,8 @@ def build(output_dir: Path) -> tuple[Path, Path]:
     manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     version = manifest["version"]
     output_dir.mkdir(parents=True, exist_ok=True)
-    archive = output_dir / f"wechat-article-subscriber-{version}.zip"
-    prefix = f"wechat-article-subscriber-{version}"
+    archive = output_dir / f"wechat-article-link-reviewer-{version}.zip"
+    prefix = f"wechat-article-link-reviewer-{version}"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
         for path in release_files():
             relative = path.relative_to(ROOT).as_posix()

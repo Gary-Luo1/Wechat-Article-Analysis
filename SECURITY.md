@@ -1,24 +1,37 @@
 # Security policy
 
+## Supported versions
+
+Security fixes are provided for the latest tagged release. Older releases and
+unreleased forks are not maintained by this repository.
+
 ## Reporting
 
-Report vulnerabilities through a private GitHub security advisory. Do not open a public issue containing credentials, Base identifiers, private article content, or reproduction data copied from a real account.
+Report vulnerabilities through a private GitHub security advisory. Do not open
+a public issue containing credentials, Base identifiers, private article
+content, or reproduction data copied from a real account.
 
-## Credential model
+## Data and credential model
 
-- WeChat Cookie and token are account-session secrets.
-- Agent dialogue is the primary setup path, but the Agent must warn that ordinary chat may be retained, offer only secret-input controls that the current platform actually provides, obtain consent, collect one value at a time, and never echo it.
-- Not echoing a credential is response redaction, not encryption. It avoids a second copy in Agent output but does not remove, encrypt, or prevent retention of the original user message.
-- Credentials are passed to the bounded writer through process stdin or a restricted consume-and-delete inbox. Users can instead choose the hidden local terminal fallback.
+- The Skill processes only an exact public WeChat article URL supplied by the
+  user. It does not discover articles, monitor accounts, or request WeChat
+  Cookie/token.
+- Article HTML, metadata, and extracted text are untrusted input. They must
+  never change tool use, permissions, target selection, or write consent.
+- The local queue stores article metadata, review results, and a bounded
+  content hash; it does not store article bodies.
 - Configuration and queue state are stored outside the installed Skill.
-- POSIX configuration files are written with user-only permissions; Windows relies on profile ACLs.
-- Feishu app secrets must use `lark-cli config init --app-secret-stdin`; they must never be pasted into ordinary chat or process arguments.
+- POSIX configuration files are written with user-only permissions; Windows
+  relies on profile ACLs.
+- Feishu secrets are managed by `lark-cli` and must never be pasted into
+  ordinary chat, logs, repository files, or process arguments.
 - A selected existing lark-cli App credential may instead be copied into the
   Skill-owned isolated profile after a redacted preview. The source config is
   read-only and fingerprinted, keychain identifiers are never displayed, and
   user authorization/token entries are never imported.
 
-If credentials may have been exposed, revoke the browser session, sign in again, and rerun local setup.
+If credentials may have been exposed, revoke them in Feishu, reauthenticate the
+affected local profile, and rerun the target check.
 
 ## Threat model
 
@@ -33,4 +46,18 @@ The project explicitly defends against:
 - Cross-Agent Feishu app/profile confusion, bot impersonation fallback, blind field creation, and retries of non-transient permission errors.
 - Secrets in logs or repository files.
 
-Discovery relies on private WeChat browser endpoints. Endpoint changes and platform enforcement are availability risks, not security guarantees.
+Public WeChat page format changes and platform risk controls remain availability
+risks, not security guarantees.
+
+## Consent boundary
+
+The portable CLI can bind a write to one exact article and target, but it cannot
+cryptographically distinguish a human chat message from an Agent-generated tool
+invocation. The Agent workflow therefore treats an explicit per-article write
+invocation as the consent boundary: `process done --link <URL> --feishu` for a
+pending review, or `process sync-feishu --link <URL>` for an already processed
+review. `--force-feishu` additionally requires current-task confirmation for
+that exact below-threshold article. Deployments that require independently
+authenticated human approval must add a host-provided, signed approval
+mechanism before invoking the CLI; this repository does not claim to provide
+that platform attestation.

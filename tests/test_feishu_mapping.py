@@ -12,8 +12,6 @@ def configured(home: Path) -> dict:
     from config_store import DEFAULT_CONFIG, save_config
 
     config = json.loads(json.dumps(DEFAULT_CONFIG))
-    config["wechat"] = {"cookie": "cookie-secret", "token": "token-secret"}
-    config["subscriptions"] = [{"name": "Example"}]
     config["feishu"].update(
         {
             "destination": "existing",
@@ -23,14 +21,6 @@ def configured(home: Path) -> dict:
             "cli_profile": "skill-cli_abc",
             "base_token": "base_token",
             "table_id": "table_id",
-        }
-    )
-    config["setup"]["execution_policy"].update(
-        {
-            "confirmed": True,
-            "mode": "autopilot",
-            "allow_feishu_sync": True,
-            "approved_at": "2026-01-01T00:00:00+00:00",
         }
     )
     save_config(config)

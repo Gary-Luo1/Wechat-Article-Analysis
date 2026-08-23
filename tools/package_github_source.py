@@ -60,8 +60,6 @@ FORBIDDEN_NAMES = {
     "config.json",
     "queue.json",
     "queue.lock",
-    "init_config.py",
-    "lark_cli.py",
 }
 
 
@@ -96,9 +94,9 @@ def source_files() -> list[Path]:
 def build(output_dir: Path) -> Path:
     plugin = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     version = str(plugin["version"])
-    prefix = f"wechat-article-subscriber-{version}"
+    prefix = f"wechat-article-link-reviewer-{version}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    archive = output_dir / f"wechat-article-subscriber-{version}-github-source.zip"
+    archive = output_dir / f"wechat-article-link-reviewer-{version}-github-source.zip"
     files = source_files()
     manifest_lines: list[str] = []
     if archive.exists():

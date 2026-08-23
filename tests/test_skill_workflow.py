@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "wechat-article-subscriber"
+SKILL = ROOT / "skills" / "wechat-article-link-reviewer"
 
 
 def test_skill_requires_post_review_feishu_confirmation():
@@ -60,4 +60,4 @@ def test_readme_uses_user_identity_and_disables_bot_manager_grants():
     approval = readme.index("feishu-manager-access --mode approve")
     create = readme.index("feishu-create-base", approval)
     assert identity < approval < create
-    assert "portable Bot creation and manager grants are disabled" in readme
+    assert "便携运行时不支持 Bot 新建 Base 或授予管理员权限" in readme

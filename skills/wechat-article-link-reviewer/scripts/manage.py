@@ -38,13 +38,6 @@ from config_store import (
     update_health,
     validate_config,
 )
-from execution_policy import (
-    allows_automatic_provisioning,
-    invalidate_for_feishu_change,
-    invalidate_policy,
-    next_stage,
-    policy_for,
-)
 from feishu_target import production_feishu_target
 from paths import config_path, data_dir, lock_path, queue_path, venv_dir
 from lark_runtime import (
@@ -57,13 +50,6 @@ from protocol import dump, failure, success
 
 STEP_LABELS = {
     "feishu_destination": "确认是否写入飞书多维表格",
-    "local_config": "准备本地配置文件",
-    "wechat_credentials": "填写微信 Cookie 和 token",
-    "wechat_validation": "验证微信登录状态",
-    "search_window": "确认文章搜索时间范围",
-    "subscriptions": "添加订阅公众号",
-    "subscription_resolution": "确认公众号匹配结果",
-    "execution_policy": "确认一次性自动执行范围",
     "feishu_identity": "选择飞书执行身份",
     "feishu_authorization": "完成飞书身份授权",
     "feishu_target": "确认飞书目标表格",
@@ -74,15 +60,7 @@ ACTION_LABELS = {
     "ask_user_for_feishu_destination": "选择跳过飞书、映射现有多维表格或创建新表",
     "import_current_feishu_bot_context": "从当前飞书机器人会话验证 App ID 和发送者上下文",
     "bind_detected_feishu_bot": "绑定当前飞书会话的机器人应用",
-    "ask_user_to_choose_chat_or_local_file": "选择在聊天中配置，或编辑本地配置文件",
     "repair_local_config_file": "修复本地配置文件中的 JSON 或字段错误",
-    "edit_local_config_file": "填写并保存本地配置文件",
-    "run_online_doctor": "验证微信 Cookie、token 和公众号",
-    "ask_user_for_search_window": "选择文章搜索时间范围",
-    "ask_for_subscription_names": "添加至少一个公众号",
-    "resolve_and_confirm_subscriptions": "确认公众号搜索匹配结果",
-    "review_and_apply_subscription_batch": "检查批量订阅预览并确认写入",
-    "review_and_confirm_execution_policy": "一次确认后续自动执行范围",
     "ask_feishu_identity_before_authorization": "选择个人用户或机器人身份",
     "run_feishu_auth_start": "检查现有飞书授权；仅在缺失时发起一次授权",
     "resume_existing_user_base_authorization": "继续当前飞书授权，不要重新发起",
@@ -91,11 +69,8 @@ ACTION_LABELS = {
     "authorize_and_run_feishu_check": "完成飞书只读检查",
     "select_feishu_app": "选择并固定本技能要使用的飞书 App ID",
     "configure_private_lark_profile": "在技能私有目录中配置已选飞书应用",
-    "provision_configured_feishu_base": "自动创建并验证已批准的飞书多维表格",
     "configure_existing_feishu_target": "配置一个明确的现有飞书目标表格",
-    "rerun_with_yes_or_update_execution_policy": "确认本次创建，或更新一次性自动执行范围",
-    "continue_setup_then_execute": "继续完成配置并自动执行任务",
-    "discover_articles": "发现并查看新文章",
+    "rerun_with_yes": "确认后重新运行本次命令",
 }
 
 
@@ -175,10 +150,10 @@ def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
     report: dict[str, Any] = {
         "runtime": {
             "python": platform.python_version(),
-            "supported": sys.version_info >= (3, 9),
+            "supported": sys.version_info >= (3, 10),
             "dependencies": {
                 name: importlib.util.find_spec(name) is not None
-                for name in ("requests", "bs4")
+                for name in ("requests", "bs4", "curl_cffi")
             },
         },
         "paths": {
@@ -271,12 +246,11 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
         state["changed"] = previous != destination
         if state["changed"]:
             _reset_manager_access(config)
-            invalidate_policy(config)
         return config
 
     modify_config(mutate)
     next_action = (
-        "review_and_confirm_execution_policy"
+        "provide_article_link"
         if destination == "skip"
         else "run_feishu_context_then_authorize_only_if_needed"
     )
@@ -285,7 +259,6 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
         "previous_destination": state["previous"],
         "explicit_user_choice_required": True,
         "target_or_credentials_deleted": False,
-        "execution_policy_invalidated": state["changed"],
     }, next_action
 
 
@@ -304,7 +277,7 @@ def _parse_feishu_target_url(value: str) -> tuple[str, str, str]:
     ):
         raise ValueError("Feishu Base URL must use HTTPS on a feishu.cn or larksuite.com host")
     segments = [segment for segment in parsed.path.split("/") if segment]
-    if len(segments) < 2 or segments[0] != "base":
+    if len(segments) != 2 or segments[0] != "base":
         raise ValueError("Feishu Base URL must contain /base/<BASE_TOKEN>")
     base_token = segments[1].strip()
     tables = [item.strip() for item in parse_qs(parsed.query).get("table", []) if item.strip()]
@@ -362,18 +335,12 @@ def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         if not same_target:
             config["feishu"]["field_mapping"] = {}
             config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-        state["policy_invalidated"] = invalidate_for_feishu_change(
-            config,
-            previous,
-            config["feishu"],
-        )
         return config
 
     modify_config(mutate)
     return {
         **preview,
         "configured": True,
-        "execution_policy_invalidated": bool(state.get("policy_invalidated")),
     }, "authorize_and_run_feishu_check"
 
 
@@ -483,7 +450,6 @@ def _import_feishu_host_context(
         state["changed"] = previous_scope != current_scope
         if state["changed"]:
             config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-            invalidate_policy(config)
         return config
 
     modify_config(mutate)
@@ -496,7 +462,6 @@ def _import_feishu_host_context(
         "sender_persisted": False,
         "sender_open_id_included": False,
         "binding_mode": "agent",
-        "execution_policy_invalidated": state["changed"],
         "host_context_contains_secrets": False,
     }, "bind_detected_feishu_bot"
 
@@ -654,7 +619,6 @@ def _feishu_identity(identity: str) -> dict[str, Any]:
                 config["feishu"]["agent_source"] = ""
                 config["feishu"]["expected_app_id"] = ""
                 config["feishu"]["cli_profile"] = ""
-            invalidate_policy(config)
         return config
 
     config = modify_config(mutate)
@@ -688,7 +652,6 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
         if previous != normalized:
             config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
             _reset_authorization(config, config["feishu"]["identity"])
-            invalidate_policy(config)
             config["feishu"].update(
                 {
                     "enabled": False,
@@ -822,20 +785,11 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "global_profiles_modified": False,
         "resuming_existing_base": resuming,
     }
-    policy_authorized = allows_automatic_provisioning(
-        config,
-        base_name=base_name,
-        table_name=table_name,
-    )
-    authorization_source = (
-        "persisted_execution_policy" if policy_authorized else "current_command"
-    )
-    preview["authorization_source"] = authorization_source
-    if not arguments.yes and not policy_authorized:
+    preview["authorization_source"] = "current_command"
+    if not arguments.yes:
         return {
             "preview": preview,
             "created": False,
-            "policy_match": False,
         }, "rerun_with_yes"
     if (has_token or has_table) and not resuming:
         raise LarkCLIError(
@@ -936,9 +890,6 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
                 "field_mapping": check["mapping"],
             }
         )
-        config["setup"]["execution_policy"]["allow_feishu_provisioning"] = False
-        config["setup"]["execution_policy"]["provision_base_name"] = ""
-        config["setup"]["execution_policy"]["provision_table_name"] = ""
         return config
 
     config = modify_config(mutate_complete)
@@ -952,8 +903,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "separate_manager_grant_performed": False,
         "field_mapping_saved": True,
         "resumed_existing": resuming,
-        "provisioning_approval_consumed": policy_authorized,
-        "authorization_source": authorization_source,
+        "authorization_source": "current_command",
     }, "none"
 
 
@@ -976,24 +926,12 @@ def _feishu_manager_access(
                 "management access for a new Base requires user identity; "
                 "bot-created Base grants are disabled"
             )
-        previous_scope = (
-            config["feishu"].get("manager_access", "undecided"),
-            config["feishu"].get("manager_access_base_name", ""),
-            config["feishu"].get("manager_access_table_name", ""),
-        )
         _set_manager_access(
             config,
             selected,
             base_name=normalized_base_name if selected == "approved" else "",
             table_name=normalized_table_name if selected == "approved" else "",
         )
-        current_scope = (
-            config["feishu"]["manager_access"],
-            config["feishu"]["manager_access_base_name"],
-            config["feishu"]["manager_access_table_name"],
-        )
-        if previous_scope != current_scope:
-            invalidate_policy(config)
         return config
 
     modify_config(mutate)
@@ -1003,105 +941,6 @@ def _feishu_manager_access(
         "external_resource_changed": False,
         "approval_scoped_to_names": selected == "approved",
     }
-
-
-def _execution_policy_command(
-    arguments: argparse.Namespace,
-) -> tuple[dict[str, Any], str]:
-    config = load_config()
-    if arguments.policy_command == "show":
-        return {
-            "policy": deepcopy(policy_for(config)),
-            "allowed_when_confirmed": [
-                "routine discovery, reading, scoring, queueing, and export",
-                "the configured unlisted-publisher behavior",
-                "exact-name standard Feishu Base provisioning when enabled",
-                "qualified record sync to the configured Feishu target when enabled",
-            ],
-            "always_requires_new_authorization": [
-                "OAuth/device-page completion or new scopes",
-                "App, identity, manager, target, or schema changes",
-                "forced below-threshold Feishu writes",
-                "delete, reset, and other destructive actions",
-            ],
-        }, "none"
-
-    base_name = (arguments.base_name or "").strip()
-    table_name = (arguments.table_name or "").strip()
-    provisioning_allowed = arguments.feishu_provisioning == "allow"
-    sync_allowed = arguments.feishu_sync == "allow"
-    destination = config["feishu"]["destination"]
-    if destination == "undecided":
-        raise ValueError(
-            "choose the Feishu destination before previewing the execution policy"
-        )
-    if destination == "skip" and (provisioning_allowed or sync_allowed):
-        raise ValueError(
-            "Feishu provisioning and sync must both be denied when destination=skip"
-        )
-    if destination == "existing" and provisioning_allowed:
-        raise ValueError(
-            "Feishu provisioning cannot be allowed when destination=existing"
-        )
-    if arguments.mode == "guided":
-        if (
-            arguments.unlisted_publisher != "ask"
-            or provisioning_allowed
-            or sync_allowed
-        ):
-            raise ValueError(
-                "guided mode requires unlisted-publisher=ask and both Feishu "
-                "permissions=deny"
-            )
-    if provisioning_allowed and (not base_name or not table_name):
-        raise ValueError(
-            "--base-name and --table-name are required when Feishu provisioning is allowed"
-        )
-    if not provisioning_allowed and (base_name or table_name):
-        raise ValueError(
-            "--base-name/--table-name are only valid when Feishu provisioning is allowed"
-        )
-    proposed = {
-        **deepcopy(DEFAULT_CONFIG["setup"]["execution_policy"]),
-        "confirmed": True,
-        "mode": arguments.mode,
-        "unlisted_publisher": arguments.unlisted_publisher,
-        "allow_feishu_provisioning": provisioning_allowed,
-        "provision_base_name": base_name,
-        "provision_table_name": table_name,
-        "allow_feishu_sync": sync_allowed,
-        "approved_at": "",
-    }
-    preview = {
-        "feishu_destination": destination,
-        "policy": proposed,
-        "effect": (
-            "After this one confirmation, the Agent continues automatically inside "
-            "this exact scope without asking again."
-        ),
-        "excluded": [
-            "new OAuth scopes or completing the user-owned authorization page",
-            "changes to the Feishu App, identity, manager, target, or schema",
-            "forced below-threshold writes",
-            "delete, reset, and other destructive actions",
-        ],
-    }
-    if not arguments.yes:
-        return {"preview": preview, "saved": False}, "rerun_with_yes"
-    proposed["approved_at"] = datetime.now(timezone.utc).isoformat()
-
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        config["setup"]["execution_policy"] = proposed
-        return config
-
-    modify_config(mutate)
-    return {
-        "saved": True,
-        "policy": deepcopy(proposed),
-        "agent_may_continue": arguments.mode == "autopilot",
-        "additional_routine_confirmations_required": False,
-        "excluded": preview["excluded"],
-    }, "continue_setup_then_execute"
 
 
 def _identity_ready(context: dict[str, Any], identity: str) -> bool:
@@ -1235,172 +1074,6 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     }, "finish_existing_user_base_authorization"
 
 
-def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
-    config = load_config()
-    items = config["subscriptions"]
-    if arguments.subscription_command == "list":
-        query = str(arguments.query or "").strip().casefold()
-        selected = [
-            item
-            for item in items
-            if not query
-            or query
-            in " ".join(str(item.get(key, "")) for key in ("name", "alias", "biz")).casefold()
-        ]
-        return {"subscriptions": selected, "count": len(selected), "total": len(items)}
-    if arguments.subscription_command == "add":
-        candidate = {
-            key: value.strip()
-            for key, value in {"name": arguments.name, "alias": arguments.alias, "biz": arguments.biz}.items()
-            if value and value.strip()
-        }
-        if not candidate:
-            raise ValueError("provide --name, --alias, or --biz")
-        identity = {str(candidate.get(key, "")).casefold() for key in ("name", "alias", "biz") if candidate.get(key)}
-        state: dict[str, Any] = {}
-
-        def mutate_add(config: dict[str, Any]) -> dict[str, Any]:
-            current_items = config["subscriptions"]
-            for existing in current_items:
-                existing_identity = {
-                    str(existing.get(key, "")).casefold()
-                    for key in ("name", "alias", "biz")
-                    if existing.get(key)
-                }
-                if identity & existing_identity:
-                    raise ValueError("subscription already exists")
-            current_items.append(candidate)
-            state["count"] = len(current_items)
-            return config
-
-        modify_config(mutate_add)
-        return {"added": candidate, "count": state["count"]}
-    if arguments.subscription_command == "bulk-add":
-        candidates: list[Any] = list(arguments.name or [])
-        if arguments.file:
-            try:
-                raw = arguments.file.read_text(encoding="utf-8-sig")
-            except OSError as exc:
-                raise ValueError(f"cannot read subscription file: {exc}") from exc
-            if arguments.file.suffix.casefold() == ".json":
-                try:
-                    loaded = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"subscription JSON is invalid: {exc}") from exc
-                if not isinstance(loaded, list):
-                    raise ValueError("subscription JSON must be an array")
-                candidates.extend(loaded)
-            else:
-                candidates.extend(
-                    line.strip()
-                    for line in raw.splitlines()
-                    if line.strip() and not line.lstrip().startswith("#")
-                )
-        if not candidates:
-            raise ValueError("provide one or more --name values or --file")
-        if len(candidates) > 100:
-            raise ValueError("cannot add more than 100 subscriptions at once")
-        def normalize(value: Any) -> dict[str, str]:
-            if isinstance(value, str):
-                return {"name": value.strip()}
-            if isinstance(value, dict):
-                unexpected = set(value) - {"name", "alias", "biz"}
-                if unexpected:
-                    raise ValueError(f"unsupported subscription keys: {sorted(unexpected)}")
-                normalized = {}
-                for key in ("name", "alias", "biz"):
-                    raw = value.get(key, "")
-                    if not isinstance(raw, str):
-                        raise ValueError(f"subscription {key} must be a string")
-                    if raw.strip():
-                        normalized[key] = raw.strip()
-                return normalized
-            raise ValueError("each subscription must be a name or object")
-
-        normalized_candidates = [normalize(value) for value in candidates]
-        state: dict[str, Any] = {}
-
-        def mutate_bulk(config: dict[str, Any]) -> dict[str, Any]:
-            current_items = config["subscriptions"]
-            existing_identities = {
-                str(item.get(key, "")).strip().casefold()
-                for item in current_items
-                for key in ("name", "alias", "biz")
-                if str(item.get(key, "")).strip()
-            }
-            added_local: list[dict[str, str]] = []
-            skipped_local: list[str] = []
-            for candidate in normalized_candidates:
-                identities = {item.casefold() for item in candidate.values() if item}
-                if not identities:
-                    raise ValueError("subscription entries cannot be empty")
-                if identities & existing_identities:
-                    skipped_local.append(candidate.get("name") or next(iter(candidate.values())))
-                    continue
-                added_local.append(candidate)
-                existing_identities.update(identities)
-            state["added"] = added_local
-            state["skipped"] = skipped_local
-            state["total"] = len(current_items) + len(added_local)
-            current_items.extend(added_local)
-            return config
-
-        if not arguments.dry_run:
-            modify_config(mutate_bulk)
-        else:
-            existing_identities = {
-                str(item.get(key, "")).strip().casefold()
-                for item in items
-                for key in ("name", "alias", "biz")
-                if str(item.get(key, "")).strip()
-            }
-            state["added"] = []
-            state["skipped"] = []
-            for candidate in normalized_candidates:
-                identities = {item.casefold() for item in candidate.values() if item}
-                if not identities:
-                    raise ValueError("subscription entries cannot be empty")
-                if identities & existing_identities:
-                    state["skipped"].append(candidate.get("name") or next(iter(candidate.values())))
-                else:
-                    state["added"].append(candidate)
-                    existing_identities.update(identities)
-        return {
-            "dry_run": bool(arguments.dry_run),
-            "added": state["added"],
-            "added_count": len(state["added"]),
-            "skipped_duplicates": state["skipped"],
-            "total": (
-                len(items) + len(state["added"])
-                if arguments.dry_run
-                else state["total"]
-            ),
-        }
-    selector = arguments.value.casefold()
-    state: dict[str, Any] = {}
-
-    def mutate_remove(config: dict[str, Any]) -> dict[str, Any]:
-        current_items = config["subscriptions"]
-        retained = [
-            item
-            for item in current_items
-            if selector
-            not in {
-                str(item.get(key, "")).casefold() for key in ("name", "alias", "biz")
-            }
-        ]
-        removed = len(current_items) - len(retained)
-        if not removed:
-            raise LookupError("subscription not found")
-        config["subscriptions"] = retained
-        state["removed"] = removed
-        state["count"] = len(retained)
-        return config
-
-    modify_config(mutate_remove)
-    return {"removed": state["removed"], "count": state["count"]}
-
-
 def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     config = load_config()
     current = config["preferences"]
@@ -1479,15 +1152,11 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     existing = sorted({path.resolve() for path in targets if path.exists()}, key=str)
     if not arguments.yes:
         return {"preview": [str(path) for path in existing], "deleted": []}, "rerun_with_yes"
-    if scope == "credentials":
+    if scope == "feishu":
         def mutate_reset(config: dict[str, Any]) -> dict[str, Any]:
-            config["wechat"] = {"cookie": "", "token": ""}
             config["setup"]["feishu_identity_confirmed"] = False
             config["setup"]["feishu_authorization"] = dict(
                 DEFAULT_CONFIG["setup"]["feishu_authorization"]
-            )
-            config["setup"]["execution_policy"] = deepcopy(
-                DEFAULT_CONFIG["setup"]["execution_policy"]
             )
             config["feishu"].update({
                 "destination": "undecided",
@@ -1508,7 +1177,7 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             return config
 
         modify_config(mutate_reset)
-        return {"cleared": "credentials", "preserved": ["subscriptions", "settings", "queue"]}, "ask_user_to_choose_chat_or_local_file"
+        return {"cleared": "feishu", "preserved": ["settings", "preferences", "queue"]}, "ask_user_for_feishu_destination"
     root = data_dir().resolve()
     for target in existing:
         if target.parent != root and target not in {
@@ -1530,32 +1199,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--online", action="store_true")
-    doctor.add_argument("--save-resolved", action="store_true")
     commands.add_parser("status")
     commands.add_parser("config-show")
-    policy = commands.add_parser("execution-policy")
-    policy_commands = policy.add_subparsers(dest="policy_command", required=True)
-    policy_commands.add_parser("show")
-    set_policy = policy_commands.add_parser("set")
-    set_policy.add_argument("--mode", choices=("guided", "autopilot"), required=True)
-    set_policy.add_argument(
-        "--unlisted-publisher",
-        choices=("ask", "ingest_once", "auto_subscribe"),
-        required=True,
-    )
-    set_policy.add_argument(
-        "--feishu-provisioning",
-        choices=("allow", "deny"),
-        required=True,
-    )
-    set_policy.add_argument("--base-name")
-    set_policy.add_argument("--table-name")
-    set_policy.add_argument(
-        "--feishu-sync",
-        choices=("allow", "deny"),
-        required=True,
-    )
-    set_policy.add_argument("--yes", action="store_true")
     destination = commands.add_parser("feishu-destination")
     destination.add_argument(
         "--mode",
@@ -1624,7 +1269,7 @@ def build_parser() -> argparse.ArgumentParser:
     disable = commands.add_parser("feishu-disable")
     disable.add_argument("--yes", action="store_true")
     reset = commands.add_parser("reset")
-    reset.add_argument("--scope", choices=("credentials", "queue", "all-data"), required=True)
+    reset.add_argument("--scope", choices=("feishu", "queue", "all-data"), required=True)
     reset.add_argument("--yes", action="store_true")
     return parser
 
@@ -1634,13 +1279,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         next_action = "none"
         if arguments.command == "doctor":
-            data, next_action = _doctor(online=arguments.online, save_resolved=arguments.save_resolved)
+            data, next_action = _doctor(online=arguments.online, save_resolved=False)
         elif arguments.command == "status":
             data, next_action = _status()
         elif arguments.command == "config-show":
             data = redacted_config(load_config())
-        elif arguments.command == "execution-policy":
-            data, next_action = _execution_policy_command(arguments)
         elif arguments.command == "feishu-destination":
             data, next_action = _feishu_destination(arguments.mode)
         elif arguments.command == "feishu-target":
@@ -1680,7 +1323,6 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 def mutate_disable(config: dict[str, Any]) -> dict[str, Any]:
                     config["feishu"]["enabled"] = False
-                    config["setup"]["execution_policy"]["allow_feishu_sync"] = False
                     return config
 
                 modify_config(mutate_disable)

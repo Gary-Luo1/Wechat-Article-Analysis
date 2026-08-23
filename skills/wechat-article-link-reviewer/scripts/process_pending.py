@@ -120,7 +120,8 @@ class BatchReadError(ValueError):
 
 
 def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
-    index = arguments.index - 1 if arguments.index is not None else None
+    raw_index = getattr(arguments, "index", None)
+    index = raw_index - 1 if raw_index is not None else None
     return resolve_pending(index=index, link=arguments.link)
 
 
@@ -666,7 +667,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="WeChat article URL to read and prepare for scoring without discovery",
     )
     done_parser = commands.add_parser("done")
-    _add_selector(done_parser)
+    done_parser.add_argument(
+        "--link",
+        required=True,
+        help="stable article URL; required to prevent queue-index drift",
+    )
     done_parser.add_argument("--ad", action="store_true")
     dimensions = done_parser.add_mutually_exclusive_group()
     dimensions.add_argument("--dims", help="JSON object containing exactly five dimensions")
@@ -730,12 +735,14 @@ def _dispatch(arguments: argparse.Namespace) -> int:
     if arguments.command == "evaluate":
         return cmd_evaluate(arguments)
     if arguments.command == "done":
-        if arguments.index is None and not arguments.link:
-            raise ValueError("provide an index or --link")
         return cmd_done(arguments)
     if arguments.command == "sync-feishu":
         if arguments.force_feishu and not arguments.link:
             raise ValueError("--force-feishu requires --link")
+        if arguments.all and not arguments.dry_run:
+            raise ValueError(
+                "--all is preview-only; write one explicitly confirmed article with --link"
+            )
         if arguments.link:
             return cmd_sync_one(
                 arguments.link,

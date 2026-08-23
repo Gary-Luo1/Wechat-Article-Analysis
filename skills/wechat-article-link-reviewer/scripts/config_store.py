@@ -13,11 +13,10 @@ from paths import config_path, data_dir, secure_write_json
 from process_lock import process_lock
 
 
-CONFIG_VERSION = 12
+CONFIG_VERSION = 13
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": CONFIG_VERSION,
     "setup": {
-        "search_window_confirmed": False,
         "feishu_identity_confirmed": False,
         "feishu_authorization": {
             "state": "not_started",
@@ -26,20 +25,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "completed_at": "",
             "updated_at": "",
         },
-        "execution_policy": {
-            "confirmed": False,
-            "mode": "guided",
-            "unlisted_publisher": "ask",
-            "allow_feishu_provisioning": False,
-            "provision_base_name": "",
-            "provision_table_name": "",
-            "allow_feishu_sync": False,
-            "approved_at": "",
-            "scope_version": 1,
-        },
     },
-    "wechat": {"cookie": "", "token": ""},
-    "subscriptions": [],
     "feishu": {
         "destination": "undecided",
         "enabled": False,
@@ -62,9 +48,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "field_mapping": {},
     },
     "settings": {
-        "check_hours": 24,
         "request_delay": 3.0,
-        "max_articles_per_account": 10,
         # URL identity is authoritative. Optional content deduplication is off by
         # default because distinct articles may legitimately reuse titles and
         # summaries.
@@ -80,12 +64,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "digest_limit": 5,
     },
     "health": {
-        "wechat": {
-            "last_verified_at": "",
-            "last_failure_kind": "",
-            "consecutive_failures": 0,
-        },
-        "subscriptions": {"last_verified_at": "", "unresolved": 0},
         "feishu": {
             "last_verified_at": "",
             "last_failure_kind": "",
@@ -131,24 +109,23 @@ LEGACY_FIELD_MAPPING = {
 def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(DEFAULT_CONFIG)
     merged["version"] = raw.get("version", 1)
-    for section in ("wechat", "feishu", "settings", "preferences"):
+    for section in ("feishu", "settings", "preferences"):
         value = raw.get(section, {})
         if isinstance(value, dict):
             merged[section].update(value)
     raw_setup = raw.get("setup", {})
     if isinstance(raw_setup, dict):
-        nested_setup = {"feishu_authorization", "execution_policy"}
-        merged["setup"].update(
-            {key: value for key, value in raw_setup.items() if key not in nested_setup}
-        )
+        nested_setup = {"feishu_authorization"}
+        if "feishu_identity_confirmed" in raw_setup:
+            merged["setup"]["feishu_identity_confirmed"] = raw_setup[
+                "feishu_identity_confirmed"
+            ]
         for key in nested_setup:
             raw_value = raw_setup.get(key)
             if isinstance(raw_value, dict):
                 merged["setup"][key].update(raw_value)
             elif key in raw_setup:
                 merged["setup"][key] = raw_value
-    if "subscriptions" in raw:
-        merged["subscriptions"] = raw["subscriptions"]
     raw_health = raw.get("health")
     if isinstance(raw_health, dict):
         for section in merged["health"]:
@@ -169,23 +146,12 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
             merged["feishu"]["field_mapping"] = deepcopy(LEGACY_FIELD_MAPPING)
             merged["feishu"]["provisioning"] = "existing"
         if "destination" not in raw_feishu:
-            policy = merged["setup"]["execution_policy"]
             if has_target:
                 merged["feishu"]["destination"] = (
                     "create"
                     if merged["feishu"].get("provisioning") == "created"
                     else "existing"
                 )
-            elif bool(policy.get("allow_feishu_provisioning")):
-                merged["feishu"]["destination"] = "create"
-            elif bool(policy.get("allow_feishu_sync")):
-                merged["feishu"]["destination"] = "existing"
-            elif bool(policy.get("confirmed")):
-                # Older confirmed policies always included the two Feishu
-                # allow/deny decisions, so deny+deny is a recoverable explicit
-                # skip. Unconfirmed WeChat-only installs remain undecided and
-                # must answer the question once after upgrading.
-                merged["feishu"]["destination"] = "skip"
             elif bool(merged["feishu"].get("enabled")):
                 merged["feishu"]["destination"] = "existing"
         # Version 11 stored an unscoped manager approval. It cannot be safely
@@ -207,23 +173,15 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
 def _validate_health(health: Any) -> None:
     if not isinstance(health, dict):
         raise ConfigError("health must be an object")
-    for section in ("wechat", "subscriptions", "feishu"):
-        if not isinstance(health.get(section), dict):
-            raise ConfigError(f"health.{section} must be an object")
-    for section in ("wechat", "feishu"):
-        value = health[section]
-        for key in ("last_verified_at", "last_failure_kind"):
-            if not isinstance(value.get(key), str):
-                raise ConfigError(f"health.{section}.{key} must be a string")
-        failures = value.get("consecutive_failures")
-        if not isinstance(failures, int) or isinstance(failures, bool) or failures < 0:
-            raise ConfigError(f"health.{section}.consecutive_failures must be non-negative")
-    subscriptions = health["subscriptions"]
-    if not isinstance(subscriptions.get("last_verified_at"), str):
-        raise ConfigError("health.subscriptions.last_verified_at must be a string")
-    unresolved = subscriptions.get("unresolved")
-    if not isinstance(unresolved, int) or isinstance(unresolved, bool) or unresolved < 0:
-        raise ConfigError("health.subscriptions.unresolved must be non-negative")
+    value = health.get("feishu")
+    if not isinstance(value, dict):
+        raise ConfigError("health.feishu must be an object")
+    for key in ("last_verified_at", "last_failure_kind"):
+        if not isinstance(value.get(key), str):
+            raise ConfigError(f"health.feishu.{key} must be a string")
+    failures = value.get("consecutive_failures")
+    if not isinstance(failures, int) or isinstance(failures, bool) or failures < 0:
+        raise ConfigError("health.feishu.consecutive_failures must be non-negative")
 
 
 def _validate_feishu(feishu: Any) -> None:
@@ -325,7 +283,7 @@ def _validate_feishu(feishu: Any) -> None:
     # boundary and requires resolvable title/url fields before any write.
 
 
-def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> dict[str, Any]:
+def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ConfigError("config must be a JSON object")
     config = _merge_defaults(config)
@@ -338,8 +296,6 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
         )
     config["version"] = CONFIG_VERSION
     setup = config["setup"]
-    if not isinstance(setup.get("search_window_confirmed"), bool):
-        raise ConfigError("setup.search_window_confirmed must be boolean")
     if not isinstance(setup.get("feishu_identity_confirmed"), bool):
         raise ConfigError("setup.feishu_identity_confirmed must be boolean")
     authorization = setup.get("feishu_authorization")
@@ -365,74 +321,9 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
     for key in ("started_at", "completed_at", "updated_at"):
         if not isinstance(authorization.get(key), str):
             raise ConfigError(f"setup.feishu_authorization.{key} must be a string")
-    execution_policy = setup.get("execution_policy")
-    if not isinstance(execution_policy, dict):
-        raise ConfigError("setup.execution_policy must be an object")
-    if not isinstance(execution_policy.get("confirmed"), bool):
-        raise ConfigError("setup.execution_policy.confirmed must be boolean")
-    if execution_policy.get("mode") not in {"guided", "autopilot"}:
-        raise ConfigError("setup.execution_policy.mode must be guided or autopilot")
-    if execution_policy.get("unlisted_publisher") not in {
-        "ask",
-        "ingest_once",
-        "auto_subscribe",
-    }:
-        raise ConfigError(
-            "setup.execution_policy.unlisted_publisher must be ask, ingest_once, "
-            "or auto_subscribe"
-        )
-    for key in ("allow_feishu_provisioning", "allow_feishu_sync"):
-        if not isinstance(execution_policy.get(key), bool):
-            raise ConfigError(f"setup.execution_policy.{key} must be boolean")
-    for key in ("provision_base_name", "provision_table_name", "approved_at"):
-        if not isinstance(execution_policy.get(key), str):
-            raise ConfigError(f"setup.execution_policy.{key} must be a string")
-    scope_version = execution_policy.get("scope_version")
-    if not isinstance(scope_version, int) or isinstance(scope_version, bool):
-        raise ConfigError("setup.execution_policy.scope_version must be an integer")
-    if scope_version != 1:
-        raise ConfigError("setup.execution_policy.scope_version is unsupported")
-    if execution_policy["mode"] == "guided" and (
-        execution_policy["unlisted_publisher"] != "ask"
-        or execution_policy["allow_feishu_provisioning"]
-        or execution_policy["allow_feishu_sync"]
-    ):
-        raise ConfigError(
-            "guided execution policy cannot pre-authorize subscription or Feishu writes"
-        )
-    if execution_policy["allow_feishu_provisioning"] and (
-        not execution_policy["provision_base_name"].strip()
-        or not execution_policy["provision_table_name"].strip()
-    ):
-        raise ConfigError(
-            "Feishu provisioning approval requires provision_base_name and "
-            "provision_table_name"
-        )
-    if not execution_policy["allow_feishu_provisioning"] and (
-        execution_policy["provision_base_name"].strip()
-        or execution_policy["provision_table_name"].strip()
-    ):
-        raise ConfigError(
-            "Feishu provisioning names require allow_feishu_provisioning=true"
-        )
-    wechat = config["wechat"]
-    if not isinstance(wechat.get("cookie"), str) or not isinstance(wechat.get("token"), str):
-        raise ConfigError("wechat.cookie and wechat.token must be strings")
-    if require_wechat and (not wechat["cookie"].strip() or not wechat["token"].strip()):
-        raise ConfigError("WeChat cookie/token are missing; run setup locally")
-    subscriptions = config["subscriptions"]
-    if not isinstance(subscriptions, list):
-        raise ConfigError("subscriptions must be a list")
-    for index, subscription in enumerate(subscriptions):
-        if not isinstance(subscription, dict):
-            raise ConfigError(f"subscriptions[{index}] must be an object")
-        if not any(str(subscription.get(key, "")).strip() for key in ("name", "alias", "biz")):
-            raise ConfigError(f"subscriptions[{index}] needs name, alias, or biz")
     settings = config["settings"]
     numeric_rules = {
-        "check_hours": (1, 24 * 365),
         "request_delay": (0, 60),
-        "max_articles_per_account": (1, 100),
         "min_score": (1, 10),
     }
     for key, (minimum, maximum) in numeric_rules.items():
@@ -462,27 +353,11 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
     if not isinstance(digest_limit, int) or isinstance(digest_limit, bool) or not 1 <= digest_limit <= 50:
         raise ConfigError("preferences.digest_limit must be an integer between 1 and 50")
     _validate_feishu(config["feishu"])
-    destination = config["feishu"]["destination"]
-    if execution_policy["confirmed"] and destination == "undecided":
-        raise ConfigError(
-            "confirmed execution policy requires an explicit Feishu destination"
-        )
-    if destination == "skip" and (
-        execution_policy["allow_feishu_provisioning"]
-        or execution_policy["allow_feishu_sync"]
-    ):
-        raise ConfigError(
-            "destination=skip cannot allow Feishu provisioning or sync"
-        )
-    if destination == "existing" and execution_policy["allow_feishu_provisioning"]:
-        raise ConfigError(
-            "destination=existing cannot allow Feishu Base provisioning"
-        )
     _validate_health(config["health"])
     return config
 
 
-def load_config(path: Path | None = None, *, require_wechat: bool = False) -> dict[str, Any]:
+def load_config(path: Path | None = None) -> dict[str, Any]:
     target = Path(path) if path else config_path()
     try:
         raw = json.loads(target.read_text(encoding="utf-8-sig"))
@@ -490,7 +365,7 @@ def load_config(path: Path | None = None, *, require_wechat: bool = False) -> di
         raise ConfigError(f"configuration not found at {target}; run setup locally") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"cannot read configuration at {target}: {exc}") from exc
-    return validate_config(raw, require_wechat=require_wechat)
+    return validate_config(raw)
 
 
 def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
@@ -542,19 +417,14 @@ def update_health(
     success: bool,
     failure_kind: str = "",
     path: Path | None = None,
-    unresolved: int | None = None,
 ) -> dict[str, Any]:
-    if section not in {"wechat", "subscriptions", "feishu"}:
+    if section != "feishu":
         raise ConfigError(f"unsupported health section: {section}")
     now = datetime.now(timezone.utc).isoformat()
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
         health = config["health"][section]
-        if section == "subscriptions":
-            health["last_verified_at"] = now
-            if unresolved is not None:
-                health["unresolved"] = max(0, int(unresolved))
-        elif success:
+        if success:
             health["last_verified_at"] = now
             health["last_failure_kind"] = ""
             health["consecutive_failures"] = 0
@@ -571,13 +441,6 @@ def redacted_config(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": validated["version"],
         "setup": deepcopy(validated["setup"]),
-        "wechat": {
-            "configured": bool(
-                validated["wechat"]["cookie"].strip()
-                and validated["wechat"]["token"].strip()
-            )
-        },
-        "subscriptions": deepcopy(validated["subscriptions"]),
         "feishu": {
             "destination": validated["feishu"]["destination"],
             "enabled": validated["feishu"]["enabled"],

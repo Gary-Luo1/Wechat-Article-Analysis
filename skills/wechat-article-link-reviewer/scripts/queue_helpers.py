@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 from paths import lock_path, queue_path, secure_write_json
 from process_lock import process_lock
-from url_identity import normalize_article_url
+from url_identity import canonicalize_wechat_article_url, normalize_article_url
 
 
 QUEUE_VERSION = 1
@@ -92,7 +92,7 @@ def _validate_article(article: Any, location: str) -> None:
     link = article.get("link")
     if not isinstance(link, str) or not link.strip():
         raise ValueError(f"{location}.link must be a non-empty string")
-    normalize_url(link)
+    canonicalize_wechat_article_url(link)
     for key in ("title", "digest", "account"):
         if key in article and not isinstance(article[key], str):
             raise ValueError(f"{location}.{key} must be a string")
@@ -172,6 +172,9 @@ def add_pending(articles: list[dict[str, Any]], *, content_dedup: bool = False) 
         added = 0
         for source in articles:
             article = deepcopy(source)
+            article["link"] = canonicalize_wechat_article_url(
+                str(article.get("link", ""))
+            )
             normalized = normalize_url(str(article.get("link", "")))
             digest = content_hash(article)
             if normalized in existing_urls or (content_dedup and digest in hashes):
@@ -203,6 +206,7 @@ def add_pending_with_verified_read(
     if not isinstance(text, str) or not text.strip():
         raise ValueError("article text must be non-empty before recording a verified read")
     article = deepcopy(source)
+    article["link"] = canonicalize_wechat_article_url(str(article.get("link", "")))
     normalized = normalize_url(str(article.get("link", "")))
     digest = content_hash(article)
     read_state = {

@@ -9,11 +9,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "wechat-article-subscriber"
+SKILL = ROOT / "skills" / "wechat-article-link-reviewer"
 ADAPTERS = (
-    ROOT / ".agents" / "skills" / "wechat-article-subscriber",
-    ROOT / ".claude" / "skills" / "wechat-article-subscriber",
-    ROOT / ".github" / "skills" / "wechat-article-subscriber",
+    ROOT / ".agents" / "skills" / "wechat-article-link-reviewer",
+    ROOT / ".claude" / "skills" / "wechat-article-link-reviewer",
+    ROOT / ".github" / "skills" / "wechat-article-link-reviewer",
 )
 
 
@@ -82,11 +82,11 @@ def validate_skill() -> None:
 
 
 def validate_adapters() -> None:
-    canonical_reference = "../../../skills/wechat-article-subscriber/SKILL.md"
+    canonical_reference = "../../../skills/wechat-article-link-reviewer/SKILL.md"
     for adapter in ADAPTERS:
         skill_md = adapter / "SKILL.md"
         fields, text = read_frontmatter(skill_md)
-        if fields["name"] != "wechat-article-subscriber":
+        if fields["name"] != "wechat-article-link-reviewer":
             fail(f"adapter name is invalid: {skill_md.relative_to(ROOT)}")
         if "Article Link Reviewer" not in fields["description"]:
             fail(f"adapter description is not link-reviewer scoped: {skill_md.relative_to(ROOT)}")
@@ -120,7 +120,7 @@ def validate_plugin() -> None:
     unsupported = set(manifest) - allowed
     if unsupported:
         fail(f"plugin.json contains unsupported fields: {sorted(unsupported)}")
-    if manifest.get("name") != "wechat-article-subscriber":
+    if manifest.get("name") != "wechat-article-link-reviewer":
         fail("plugin name is invalid")
     if not re.fullmatch(r"\d+\.\d+\.\d+", str(manifest.get("version", ""))):
         fail("plugin version must use strict semver")
@@ -167,12 +167,78 @@ def validate_version_consistency(
         )
 
 
+def validate_no_stale_product_terms(documents: dict[str, str]) -> None:
+    """Reject public copy that revives unrelated legacy product wording."""
+    forbidden = {
+        "配置微信公众号文章" + "\u8ba2\u9605": "unrelated legacy setup prompt",
+        "WeChat Article " + "Sub" + "scriber": "different product display name",
+        "wechat-article-" + "sub" + "scriber": "different product identifier",
+    }
+    for path, text in documents.items():
+        for phrase, reason in forbidden.items():
+            if phrase in text:
+                fail(f"{path} contains {reason}: {phrase}")
+
+
+def validate_release_readiness() -> None:
+    public_documents = {
+        "install.sh": (ROOT / "install.sh").read_text(encoding="utf-8"),
+        "install.ps1": (ROOT / "install.ps1").read_text(encoding="utf-8"),
+        "CONTRIBUTING.md": (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8"),
+        "agents/openai.yaml": (SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8"),
+    }
+    validate_no_stale_product_terms(public_documents)
+
+    forbidden_runtime_terms = (
+        "wechat_cookie",
+        "wechat_token",
+        "auto_" + "sub" + "scribe",
+        "WeChatCookieExpired",
+        '"' + "sub" + "scriptions" + '"',
+    )
+    for script in (SKILL / "scripts").glob("*.py"):
+        text = script.read_text(encoding="utf-8")
+        for term in forbidden_runtime_terms:
+            if term in text:
+                fail(f"{script.relative_to(ROOT)} contains out-of-scope runtime term: {term}")
+    for removed_script in ("init_config.py", "execution_policy.py", "lark_cli.py"):
+        if (SKILL / "scripts" / removed_script).exists():
+            fail(f"out-of-scope script remains in reviewer bundle: {removed_script}")
+
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    for required in (
+        "does not discover articles",
+        "request WeChat\n  Cookie/token",
+        "untrusted input",
+    ):
+        if required not in security:
+            fail(f"SECURITY.md is missing the link-only security contract: {required}")
+
+    manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    version = re.escape(str(manifest["version"]))
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    if not re.search(rf"^##\s+{version}\s+-\s+\d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
+        fail("current CHANGELOG release must have an ISO date and must not be Unreleased")
+
+    workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    for required in (
+        "ubuntu-latest",
+        "windows-latest",
+        "'3.10'",
+        "'3.12'",
+        "python -m pip_audit",
+    ):
+        if required not in workflow:
+            fail(f"CI compatibility matrix is missing: {required}")
+
+
 def main() -> int:
     try:
         validate_skill()
         validate_adapters()
         validate_plugin()
         validate_version_consistency()
+        validate_release_readiness()
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         print(f"release validation failed: {exc}", file=sys.stderr)
         return 1
