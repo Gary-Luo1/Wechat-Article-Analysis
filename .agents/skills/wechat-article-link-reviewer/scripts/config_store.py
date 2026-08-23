@@ -24,6 +24,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "started_at": "",
             "completed_at": "",
             "updated_at": "",
+            "device_code": "",
+            "verification_url": "",
+            "hint": "",
+            "expires_in": "",
         },
     },
     "feishu": {
@@ -41,6 +45,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "manager_access_table_name": "",
         "base_token": "",
         "table_id": "",
+        "base_url": "",
         "provisioning": "",
         "created_base_name": "",
         "created_table_name": "",
@@ -206,7 +211,10 @@ def _validate_feishu(feishu: Any) -> None:
         "manager_access_table_name",
         "base_token",
         "table_id",
+        "base_url",
         "provisioning",
+        "created_base_name",
+        "created_table_name",
         "schema_policy",
     ):
         if not isinstance(feishu.get(key), str):
@@ -255,6 +263,21 @@ def _validate_feishu(feishu: Any) -> None:
         raise ConfigError(
             "enabled Feishu sync requires destination=existing or destination=create"
         )
+    base_url = feishu["base_url"].strip()
+    if base_url:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url)
+        host = str(parsed.hostname or "").casefold()
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.port not in {None, 443}
+            or not host.endswith((".feishu.cn", ".larksuite.com"))
+            or "/base/" not in parsed.path
+        ):
+            raise ConfigError("feishu.base_url must be an HTTPS Feishu Base document URL")
     mapping = feishu.get("field_mapping")
     if not isinstance(mapping, dict):
         raise ConfigError("feishu.field_mapping must be an object")
@@ -318,7 +341,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError(
             f"{authorization['state']} Feishu authorization must use user identity"
         )
-    for key in ("started_at", "completed_at", "updated_at"):
+    for key in ("started_at", "completed_at", "updated_at", "device_code", "verification_url", "hint", "expires_in"):
         if not isinstance(authorization.get(key), str):
             raise ConfigError(f"setup.feishu_authorization.{key} must be a string")
     settings = config["settings"]
@@ -404,10 +427,15 @@ def modify_config(
     If the mutator raises or validation fails, nothing is written.
     """
     with config_lock():
-        config = load_config(path)
+        target = Path(path) if path else config_path()
+        config = (
+            load_config(target)
+            if target.exists()
+            else validate_config(deepcopy(DEFAULT_CONFIG))
+        )
         result = mutator(config)
         result = result if result is not None else config
-        save_config(result, path)
+        save_config(result, target)
         return validate_config(result)
 
 
@@ -438,9 +466,13 @@ def update_health(
 
 def redacted_config(config: dict[str, Any]) -> dict[str, Any]:
     validated = validate_config(config)
+    authorization = deepcopy(validated["setup"]["feishu_authorization"])
+    authorization.pop("device_code", None)
+    setup = deepcopy(validated["setup"])
+    setup["feishu_authorization"] = authorization
     return {
         "version": validated["version"],
-        "setup": deepcopy(validated["setup"]),
+        "setup": setup,
         "feishu": {
             "destination": validated["feishu"]["destination"],
             "enabled": validated["feishu"]["enabled"],
@@ -457,6 +489,9 @@ def redacted_config(config: dict[str, Any]) -> dict[str, Any]:
             "target_configured": bool(
                 validated["feishu"]["base_token"]
                 and validated["feishu"]["table_id"]
+            ),
+            "document_url_configured": bool(
+                str(validated["feishu"].get("base_url") or "").strip()
             ),
             "provisioning": validated["feishu"]["provisioning"],
             "schema_policy": validated["feishu"]["schema_policy"],

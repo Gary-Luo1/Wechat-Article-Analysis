@@ -28,10 +28,9 @@ process --format json done --link <WECHAT_URL> --dims-file <SCORES.json> --summa
 process --format json done --link <WECHAT_URL> --dims-file <SCORES.json> --summary <SUMMARY> --tags <TAGS> --feishu
 ```
 
-`done` requires the verified-read proof from `evaluate`; it does not refetch the
-page. Repeating `evaluate` for a pending link refreshes page metadata while
-preserving local favorite/later state. Repeating it for a processed link returns
-the stored result without fetching.
+`done --feishu` and `sync-feishu --link` report the local completion line and,
+when the write succeeds, an openable Feishu Base URL. That URL is a document
+link, not a credential dump.
 
 After explicit per-article confirmation, write a processed local review without
 refetching or rescoring it:
@@ -41,19 +40,20 @@ process sync-feishu --link <WECHAT_URL>
 process sync-feishu --link <WECHAT_URL> --force-feishu
 ```
 
-Use the forced form only for an explicitly confirmed below-threshold write.
+Use the forced form only for an explicitly confirmed below-threshold write, or
+when the user explicitly asks to rewrite that one already synced article.
 
 Use `--feishu` only for an explicit requested external write. `--force-feishu`
 is limited to one article and must be backed by current-task authorization.
-The default Feishu score threshold is `6.0` in
-`settings.min_score`. A lower score is saved locally as `skipped_low_score`
-unless the user explicitly confirms that exact article and the Agent passes
-`--force-feishu`. These settings are stored in the state directory's
-`config.json`; there is currently no management command for changing them.
-Failed Feishu writes remain in the local outbox and can be retried with
-`sync-feishu --link` for one confirmed article. `sync-feishu --all --dry-run`
-may inspect the outbox, but non-dry-run bulk writes are rejected so each retry
-retains an explicit single-article confirmation boundary.
+The default Feishu score threshold is `6.0` in `settings.min_score`. A lower
+score is saved locally as `skipped_low_score` unless the user explicitly confirms
+that exact article and the Agent passes `--force-feishu`. These settings are
+stored in the state directory's `config.json`; there is currently no management
+command for changing them. Failed Feishu writes remain in the local outbox and
+can be retried with `sync-feishu --link` for one confirmed article.
+`sync-feishu --all --dry-run` may inspect the outbox, but non-dry-run bulk
+writes are rejected so each retry retains an explicit single-article
+confirmation boundary.
 
 ## Local queue
 
@@ -73,10 +73,10 @@ process clean --days <DAYS> --yes
 
 These commands operate only on links already supplied by the user and stored in
 the local queue; they never discover new articles or accounts. Dismiss is
-reversible and local-only. Export contains queue metadata and review
-results; it never contains fetched article bodies. `clean` without `--yes` is a
-preview and reports how many old, non-pending-sync records would be permanently
-deleted. Only the second form applies the deletion.
+reversible and local-only. Export contains queue metadata and review results; it
+never contains fetched article bodies. `clean` without `--yes` is a preview and
+reports how many old, non-pending-sync records would be permanently deleted.
+Only the second form applies the deletion.
 
 `process list` shows pending items only; use `inbox --status all` for the full
 queue. `inbox-mark` requires at least one flag, but the favorite and later-state

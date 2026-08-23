@@ -21,16 +21,20 @@ the current article.
 Before fetching the first article in a task, inspect the current setup with
 `manage --format json status`. If Feishu is undecided or the user has not stated
 the target for this task, ask whether this task needs Feishu first. Ask the
-target and management-access questions only when the answer is yes:
+target question only when the answer is yes. Ask the management-access question
+only when the user wants to **create** a Base:
 
 1. `这次需要把审阅结果写入飞书吗？`
 2. `如果需要，使用哪个飞书多维表格？复用已有表格请提供表格链接或明确名称和数据表名称；新建请提供 Base 名称和数据表名称。`
-3. `是否需要为本人开通这个多维表格的管理权限？`
+3. 仅新建时：`本机/非飞书宿主只能用你的飞书用户身份创建表格，你将是所有者；Bot 无法代为授权管理权限。是否继续新建？`
 
 Do not request a Base token, App secret, or Open ID in chat. Use a trusted
 current Feishu host context for identity; import it only when the matching
-supported Agent runtime is detected. Treat this setup choice as permission
-to prepare the target, not as permission to write every future article.
+supported Agent runtime is detected (`openclaw`, `hermes`, or `lark-channel`,
+plus the corresponding environment signals). On Cursor and other standalone
+hosts, Feishu writes use **user identity only**. Treat this setup choice as
+permission to prepare the target, not as permission to write every future
+article.
 
 - For `skip`, record that Feishu is not part of this task and keep the review
   local-only; do not ask the post-review write question.
@@ -46,9 +50,15 @@ to prepare the target, not as permission to write every future article.
   with `manage feishu-manager-access --mode approve --base-name <BASE_NAME>
   --table-name <TABLE_NAME>` (or `--mode decline`); approval is valid only for
   those exact names. Only `approve` permits user-identity Base creation. If the
-  user declines, leave Feishu unconfigured. A user-identity
-  flow uses the user's existing Feishu authorization and does not perform a
-  separate resource grant.
+  user declines, leave Feishu unconfigured. On standalone hosts, creation always
+  uses the user's Feishu login; do not promise a Bot manager grant.
+  First-time user path: destination → identity=user → app/import →
+  `feishu-auth start` (open the returned `verification_url`) → user authorizes →
+  `feishu-auth complete` → manager-access (create only) → create-base →
+  feishu-check. `feishu-auth start` actually starts login and persists the device
+  code locally; never echo the device code. Successful create/check/write returns
+  an openable Base URL, not raw tokens. If provisioning is already `created`,
+  resume that Base instead of creating another.
 - If the user has already made these choices in the current task, do not ask
   them again; verify the saved target and continue.
 
@@ -99,31 +109,42 @@ For installation, Python requirements, and wrapper selection, read
 
 ## Commands
 
+Resolve `<SKILL_ROOT>` to the directory containing this `SKILL.md`; do not
+assume the Agent's current working directory is the Skill directory. On Windows,
+use `<SKILL_ROOT>\scripts\run.ps1` instead of the Bash wrapper.
+
 ```text
-bash scripts/run.sh manage --format json status
-printf '%s' '<FEISHU_BASE_TABLE_URL>' | bash scripts/run.sh manage feishu-target --url-stdin
-printf '%s' '<FEISHU_BASE_TABLE_URL>' | bash scripts/run.sh manage feishu-target --url-stdin --yes
-bash scripts/run.sh manage feishu-app --app-id <APP_ID>
-bash scripts/run.sh manage feishu-local-profile scan
-bash scripts/run.sh manage feishu-local-profile import
-bash scripts/run.sh manage feishu-auth status
-bash scripts/run.sh manage feishu-auth start
-bash scripts/run.sh manage feishu-auth complete
-bash scripts/run.sh process feishu-check --save-mapping
-bash scripts/run.sh manage feishu-manager-access --mode approve --base-name <BASE_NAME> --table-name <TABLE_NAME>
-bash scripts/run.sh process --format json evaluate --url <WECHAT_URL>
-bash scripts/run.sh process --format json done --link <WECHAT_URL> --dims-file <SCORES.json> --summary <SUMMARY> --tags <TAGS>
-bash scripts/run.sh process sync-feishu --link <WECHAT_URL>
-bash scripts/run.sh process --format json inbox --status all
-bash scripts/run.sh process sync-feishu --all --dry-run
-bash scripts/run.sh process export <OUTPUT.json>
+bash "<SKILL_ROOT>/scripts/run.sh" manage --format json status
+bash "<SKILL_ROOT>/scripts/run.sh" manage doctor
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-destination --mode existing
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-destination --mode create
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-identity --as user
+printf '%s' '<FEISHU_BASE_TABLE_URL>' | bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-target --url-stdin
+printf '%s' '<FEISHU_BASE_TABLE_URL>' | bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-target --url-stdin --yes
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-app --app-id <APP_ID>
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-local-profile scan
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-local-profile import
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-auth status
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-auth start
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-auth complete
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-manager-access --mode approve --base-name <BASE_NAME> --table-name <TABLE_NAME>
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-create-base --name <BASE_NAME> --table-name <TABLE_NAME> --yes
+bash "<SKILL_ROOT>/scripts/run.sh" process feishu-check --save-mapping
+bash "<SKILL_ROOT>/scripts/run.sh" process --format json evaluate --url <WECHAT_URL>
+bash "<SKILL_ROOT>/scripts/run.sh" process --format json done --link <WECHAT_URL> --dims-file <SCORES.json> --summary <SUMMARY> --tags <TAGS>
+bash "<SKILL_ROOT>/scripts/run.sh" process sync-feishu --link <WECHAT_URL>
+bash "<SKILL_ROOT>/scripts/run.sh" process --format json inbox --status all
+bash "<SKILL_ROOT>/scripts/run.sh" process sync-feishu --all --dry-run
+bash "<SKILL_ROOT>/scripts/run.sh" process export <OUTPUT.json>
 ```
 
 Feishu is optional; no article is written unless the current task authorizes it.
-For a Feishu-hosted conversation, import the trusted current event's App ID and
-sender Open ID with `manage feishu-host-context --agent-stdin`. The managed
-existing-target flow selects that exact local CLI profile. New Base creation uses
-user identity and never performs a Bot manager grant.
+On supported `openclaw`, `hermes`, or `lark-channel` hosts, import the trusted
+current event's App ID and sender Open ID with
+`manage feishu-host-context --agent-stdin`. Other hosts, including Cursor, must
+use the standalone user-identity flow. New Base creation uses user identity and
+never performs a Bot manager grant. After a successful write or create, report
+the returned `document_url` so the user can open the table.
 Never expose a raw lark data-command entry. Read
 [references/feishu.md](references/feishu.md) for identity, authorization, target
 mapping, and external-write rules. Read [references/operations.md](references/operations.md)

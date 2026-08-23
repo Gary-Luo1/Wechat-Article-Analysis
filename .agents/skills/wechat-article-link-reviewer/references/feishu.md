@@ -1,9 +1,9 @@
 # Guided Feishu setup and sync
 
-Ask before article fetching whether this task needs Feishu writing, which exact
-Base/table to use, and whether the user wants management access. Configure a
-target only after those choices; never request WeChat credentials, Base tokens,
-App secrets, or manually supplied Open IDs in chat.
+Ask before article fetching whether this task needs Feishu writing and which
+exact Base/table to use. Ask management access only when creating a new Base.
+Configure a target only after those choices; never request WeChat credentials,
+Base tokens, App secrets, or manually supplied Open IDs in chat.
 
 Use the `manage` commands to select an existing Base or create one, establish the
 required identity, and verify the target. For an existing target, bind only the
@@ -12,14 +12,43 @@ listed table. In a Feishu-hosted conversation, the Agent imports `source`,
 `app_id`, and `sender_open_id` from the trusted current event. It selects the
 local CLI profile by that exact App ID, never by default profile or display name.
 Host-context import fails closed unless the process detects the same supported
-Agent source. These runtime signals protect against accidental standalone use;
+Agent source (`openclaw`, `hermes`, `lark-channel` plus matching environment
+signals). These runtime signals protect against accidental standalone use;
 they are not an authentication boundary against a local operator who can modify
 the process environment or application state.
-For a new Base, use the user's Feishu identity after exact-name management-access
-approval. Portable Bot creation and manager grants are disabled; Bot identity is
-limited to an existing Base selected by the user. The wrapper isolates its `lark-cli` state from the user's global profile
-and must not print secrets, access tokens, authorization codes, or resource
-tokens.
+On Cursor and other standalone hosts, use user identity only. Bot write is
+limited to those supported hosts with trusted current-event context, and only
+against an existing Base. For a new Base, use the user's Feishu identity after
+exact-name management-access approval. Portable Bot creation and manager grants
+are disabled. The wrapper isolates its `lark-cli` state from the user's global
+profile and must not print secrets, access tokens, authorization codes, device
+codes, or resource tokens. It may return an openable Base document URL after
+create, check, or a successful write.
+
+`manage feishu-auth start` actually runs isolated `auth login --no-wait`, stores
+the device code locally, and returns `verification_url`. Resume that URL if
+authorization is already `waiting`. After the user authorizes, `feishu-auth
+complete` finishes with the stored device code. Do not tell the user to run a
+raw `lark auth login` command.
+
+First-time standalone create path:
+
+```text
+manage feishu-destination --mode create
+manage feishu-identity --as user
+manage feishu-app --app-id <APP_ID>
+manage feishu-local-profile import --yes
+manage feishu-auth start
+manage feishu-auth complete
+manage feishu-manager-access --mode approve --base-name <BASE_NAME> --table-name <TABLE_NAME>
+manage feishu-create-base --name <BASE_NAME> --table-name <TABLE_NAME> --yes
+process feishu-check --save-mapping
+```
+
+If `provisioning=created` and tokens already exist, `feishu-create-base` resumes
+that Base and returns its `document_url`; do not create another Base with the
+same names. Extra empty Bases created by earlier failed retries cannot be listed
+or deleted without extra Drive scopes; ignore them and keep the stored URL.
 
 ```text
 manage feishu-destination --mode existing|create|skip
@@ -45,10 +74,11 @@ import and Base creation provide a preview before the `--yes` form applies the
 change. Install a compatible `lark-cli` separately when the runtime reports
 `LARK_MISSING_CLI`; the Skill does not install it automatically.
 
-For an existing Base only, `manage feishu-host-context --agent-stdin` can bind a
-Bot from the current host event but never authorizes a
-resource grant. The sender Open ID is validated as host input but is not persisted.
-On hosts where trusted stdin forwarding is unavailable, use
+For an existing Base only, supported `openclaw`, `hermes`, and `lark-channel`
+hosts may use `manage feishu-host-context --agent-stdin` to bind a Bot from the
+current host event; this never authorizes a resource grant. Other hosts use the
+standalone user-identity flow. The sender Open ID is validated as host input but
+is not persisted. On supported hosts where trusted stdin forwarding is unavailable, use
 `manage feishu-host-context --agent-file <TRUSTED_CONTEXT.json>` with a
 host-generated current-event file; never ask the user to compose that file.
 The separate manager-access command records the user's choice

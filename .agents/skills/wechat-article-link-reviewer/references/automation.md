@@ -6,7 +6,8 @@ first `evaluate`, inspect setup and complete the following configuration gate:
 
 1. Ask whether this task needs Feishu writing.
 2. If yes, ask which exact Base/table to use or what Base/table name to create.
-3. Ask whether to grant the current user management access to the target.
+3. Ask whether to continue user-identity Base creation only when the user chose
+   create. Do not ask for a Bot manager grant on standalone hosts.
 
 Keep configuration permission, per-article write permission, and article content
 separate. The configuration gate prepares a target; it does not authorize a

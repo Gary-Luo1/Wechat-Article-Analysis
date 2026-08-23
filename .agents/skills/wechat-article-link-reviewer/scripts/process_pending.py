@@ -15,6 +15,7 @@ from typing import Any
 from article_inbox import plan_digest, query_inbox
 from bitable_client import (
     LarkCLIError,
+    feishu_document_url,
     standard_field_schema,
 )
 from config_store import DEFAULT_CONFIG, ConfigError, load_config, modify_config, update_health
@@ -418,6 +419,8 @@ def _score_metadata(arguments: argparse.Namespace) -> dict[str, Any]:
 
 def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
     config = load_config()
+    if not config["setup"]["feishu_identity_confirmed"]:
+        raise ConfigError("confirm Feishu identity before checking or writing the target")
     feishu = config["feishu"]
     if not feishu["enabled"]:
         raise ConfigError("Feishu sync is disabled; complete Agent setup first")
@@ -426,6 +429,13 @@ def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
     )
     if not dry_run:
         update_sync_status(entry["article"]["link"], "synced")
+
+
+def _feishu_document_url() -> str:
+    try:
+        return feishu_document_url(load_config()["feishu"])
+    except ConfigError:
+        return ""
 
 
 def _raise_sync_failures(failures: list[Exception], *, prefix: str) -> None:
@@ -516,6 +526,10 @@ def cmd_done(arguments: argparse.Namespace) -> int:
                 prefix="article was saved locally but Feishu sync failed",
             )
     print(f"Completed: {article.get('title', '')} (score {metadata['score']})")
+    if status == "pending":
+        document_url = _feishu_document_url()
+        if document_url:
+            print(f"Feishu: {document_url}")
     return 0
 
 
@@ -548,7 +562,7 @@ def cmd_sync_one(link: str, *, dry_run: bool = False, force_feishu: bool = False
     metadata = entry.get("metadata", {})
     if metadata.get("disposition") == "dismissed" or metadata.get("ad"):
         raise ValueError("dismissed or advertisement articles cannot be synced to Feishu")
-    if entry.get("sync_status") == "synced":
+    if entry.get("sync_status") == "synced" and not force_feishu:
         print(f"Already synced: {entry['article'].get('title', '')}")
         return 0
     score = metadata.get("score")
@@ -571,11 +585,17 @@ def cmd_sync_one(link: str, *, dry_run: bool = False, force_feishu: bool = False
         )
     action = "Dry run succeeded" if dry_run else "Synced"
     print(f"{action}: {entry['article'].get('title', '')}")
+    if not dry_run:
+        document_url = _feishu_document_url()
+        if document_url:
+            print(f"Feishu: {document_url}")
     return 0
 
 
 def cmd_feishu_check(*, save_mapping: bool = False) -> int:
     config = load_config()
+    if not config["setup"]["feishu_identity_confirmed"]:
+        raise ConfigError("confirm Feishu identity before checking or writing the target")
     try:
         check = production_feishu_target(config["feishu"]).check()
     except Exception as exc:
@@ -588,12 +608,19 @@ def cmd_feishu_check(*, save_mapping: bool = False) -> int:
         except ConfigError:
             pass
         raise
-    if save_mapping:
-        def mutate_mapping(config: dict[str, Any]) -> dict[str, Any]:
-            config["feishu"]["field_mapping"] = check["mapping"]
-            return config
+    document_url = feishu_document_url(config["feishu"])
 
-        config = modify_config(mutate_mapping)
+    def mutate_check(config: dict[str, Any]) -> dict[str, Any]:
+        if save_mapping:
+            config["feishu"]["field_mapping"] = check["mapping"]
+        if document_url and not str(config["feishu"].get("base_url") or "").strip():
+            config["feishu"]["base_url"] = document_url
+        return config
+
+    if save_mapping or (
+        document_url and not str(config["feishu"].get("base_url") or "").strip()
+    ):
+        config = modify_config(mutate_check)
     update_health("feishu", success=True)
     print(
         json.dumps(
@@ -603,6 +630,7 @@ def cmd_feishu_check(*, save_mapping: bool = False) -> int:
                 "field_count": check["field_count"],
                 "field_mapping": check["mapping"],
                 "mapping_saved": save_mapping,
+                "document_url": document_url or feishu_document_url(config["feishu"]),
                 "note": "Read-only checks passed. A real write requires the explicit --feishu flag.",
             },
             ensure_ascii=False,
@@ -787,11 +815,25 @@ def main(argv: list[str] | None = None) -> int:
                 "dismiss",
                 "restore",
                 "digest-plan",
+                "feishu-check",
             } and len(lines) == 1:
                 try:
                     command_data = json.loads(lines[0])
                 except json.JSONDecodeError:
                     pass
+            if arguments.command in {"done", "sync-feishu"} and isinstance(
+                command_data, dict
+            ):
+                document_url = next(
+                    (
+                        line.removeprefix("Feishu: ").strip()
+                        for line in lines
+                        if line.startswith("Feishu: ")
+                    ),
+                    "",
+                )
+                if document_url:
+                    command_data["document_url"] = document_url
             next_action = "none" if result == 0 else "inspect_failed_items"
             if (
                 arguments.command == "digest-plan"

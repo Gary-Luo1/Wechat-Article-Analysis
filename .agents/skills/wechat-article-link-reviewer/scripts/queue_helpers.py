@@ -228,8 +228,16 @@ def add_pending_with_verified_read(
             None,
         )
         if existing is not None:
-            for key in ("title", "link", "digest", "account", "account_id", "update_time"):
-                existing[key] = article[key]
+            defaults: dict[str, Any] = {
+                "title": "",
+                "link": article["link"],
+                "digest": "",
+                "account": "",
+                "account_id": "",
+                "update_time": 0,
+            }
+            for key, default in defaults.items():
+                existing[key] = article.get(key, existing.get(key, default))
             if digest:
                 existing["content_hash"] = digest
             else:
@@ -272,6 +280,8 @@ def resolve_pending(*, index: int | None = None, link: str | None = None) -> dic
             if article.get("normalized_url") == normalized:
                 return article
         raise LookupError("no pending article matches that URL")
+    if not pending:
+        raise LookupError("there are no pending articles")
     if index is None or index < 0 or index >= len(pending):
         raise LookupError(f"article index must be between 1 and {len(pending)}")
     return pending[index]

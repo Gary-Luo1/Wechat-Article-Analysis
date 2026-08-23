@@ -32,6 +32,24 @@ def _system_runtime_is_ready(command: str) -> bool:
     return True
 
 
+def _interpreter_is_ready(interpreter: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                str(interpreter),
+                "-c",
+                "import bs4, curl_cffi, requests",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -43,10 +61,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     command = args.pop(0)
     script = Path(__file__).resolve().parent / COMMANDS[command]
-    interpreter = _venv_python()
-    if not interpreter.exists() and _system_runtime_is_ready(command):
+    preferred = _venv_python()
+    if preferred.exists() and _interpreter_is_ready(preferred):
+        interpreter = preferred
+    elif _system_runtime_is_ready(command):
         interpreter = Path(sys.executable)
-    if not interpreter.exists():
+    else:
         print(
             "Python dependencies are unavailable; run the repository installer first",
             file=sys.stderr,

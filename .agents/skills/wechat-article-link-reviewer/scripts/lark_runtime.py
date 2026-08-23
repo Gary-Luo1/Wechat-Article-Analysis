@@ -491,19 +491,37 @@ def import_global_lark_profile(expected_app_id: str, target_profile: str) -> dic
     }
 
 
+def should_override_isolated_home(
+    *, uses_keychain: bool, config_unreadable: bool
+) -> bool:
+    """Override HOME only when the isolated profile is known not to use keychain."""
+    return not uses_keychain and not config_unreadable
+
+
 def lark_cli_environment() -> dict[str, str]:
     home = lark_cli_home_dir()
     config = lark_cli_config_dir()
     environment: dict[str, Any] = dict(os.environ)
     for key in IDENTITY_ENV_KEYS:
         environment.pop(key, None)
-    environment.update(
-        {
-            "HOME": str(home),
-            "USERPROFILE": str(home),
-            "LARKSUITE_CLI_CONFIG_DIR": str(config),
-            "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1",
-            "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1",
-        }
-    )
+    uses_keychain = False
+    config_unreadable = False
+    private_config = config / "config.json"
+    if private_config.exists():
+        try:
+            uses_keychain = any(
+                _secret_storage(profile) == "keychain"
+                for profile in _read_lark_config(private_config)["apps"]
+            )
+        except (OSError, ValueError):
+            config_unreadable = True
+    environment.update({
+        "LARKSUITE_CLI_CONFIG_DIR": str(config),
+        "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1",
+        "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1",
+    })
+    if should_override_isolated_home(
+        uses_keychain=uses_keychain, config_unreadable=config_unreadable
+    ):
+        environment.update({"HOME": str(home), "USERPROFILE": str(home)})
     return {str(key): str(value) for key, value in environment.items()}

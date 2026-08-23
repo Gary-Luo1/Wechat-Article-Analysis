@@ -10,6 +10,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from lark_runtime import (
     global_lark_config_fingerprint,
@@ -160,6 +161,11 @@ class LarkCLIError(RuntimeError):
 TESTED_LARK_CLI_VERSION = "1.0.69"
 MIN_LARK_CLI_VERSION = (1, 0, 69)
 MAX_LARK_CLI_MAJOR = 1
+USER_BASE_SCOPES = (
+    "base:app:create,base:app:read,base:table:create,base:table:read,"
+    "base:field:create,base:field:read,base:record:create,"
+    "base:record:read,base:record:update"
+)
 
 
 def standard_field_schema() -> list[dict[str, Any]]:
@@ -230,6 +236,11 @@ def lark_cli_info() -> dict[str, Any]:
     }
 
 
+_SECRET_JSON_FIELD = re.compile(
+    r'(?i)("(?:device_code|device-code|user_code|usercode)"\s*:\s*")[^"]*'
+)
+
+
 def _redact_cli_error(text: str, args: list[str]) -> str:
     redacted = text
     for flag in (
@@ -244,6 +255,7 @@ def _redact_cli_error(text: str, args: list[str]) -> str:
         for index in positions:
             if index + 1 < len(args) and args[index + 1]:
                 redacted = redacted.replace(args[index + 1], "<redacted>")
+    redacted = _SECRET_JSON_FIELD.sub(r"\1<redacted>", redacted)
     return redacted[:1200]
 
 
@@ -361,7 +373,7 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
 
 
 def _run_lark(
-    args: list[str], *, retries: int = 3
+    args: list[str], *, retries: int = 3, timeout: int = 60
 ) -> dict[str, Any] | list[Any]:
     try:
         safe_args = safe_lark_arguments(args, allow_managed_writes=True)
@@ -382,7 +394,7 @@ def _run_lark(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
+                timeout=timeout,
                 check=False,
                 env=lark_cli_environment(),
                 cwd=work_dir,
@@ -431,15 +443,58 @@ def _run_lark(
 
 def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = payload.get("data", payload)
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        nested = data["data"]
+        if any(
+            isinstance(nested.get(key), list)
+            for key in ("items", "fields", "records", "tables")
+        ):
+            data = nested
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
     if not isinstance(data, dict):
         return []
     for key in ("items", "fields", "records", "tables"):
         value = data.get(key)
-        if isinstance(value, list):
+        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
             return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _record_list_node(payload: dict[str, Any]) -> Any:
+    node = payload.get("data", payload) if isinstance(payload, dict) else payload
+    while (
+        isinstance(node, dict)
+        and isinstance(node.get("data"), dict)
+        and not isinstance(node.get("record_id_list"), list)
+        and isinstance(node["data"].get("record_id_list"), list)
+    ):
+        node = node["data"]
+    return node
+
+
+def _records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    node = _record_list_node(payload)
+    if isinstance(node, dict) and isinstance(node.get("record_id_list"), list):
+        identifiers = node.get("record_id_list") or []
+        names = node.get("fields") if isinstance(node.get("fields"), list) else []
+        rows = node.get("data") if isinstance(node.get("data"), list) else []
+        records: list[dict[str, Any]] = []
+        for index, record_id in enumerate(identifiers):
+            identifier = str(record_id or "").strip()
+            if not identifier:
+                continue
+            row = rows[index] if index < len(rows) else []
+            fields: dict[str, Any] = {}
+            if isinstance(row, list):
+                for name, cell in zip(names, row):
+                    if isinstance(name, str) and name.strip():
+                        fields[name] = cell
+            elif isinstance(row, dict):
+                fields = dict(row)
+            records.append({"record_id": identifier, "id": identifier, "fields": fields})
+        return records
+    return _items(payload)
 
 
 def list_fields(
@@ -703,7 +758,7 @@ def find_record_by_url(
             "json",
         ]
     )
-    matches = _items(payload)
+    matches = _records(payload)
     if len(matches) > 1:
         raise LarkCLIError(
             "multiple Feishu records have the same article URL", kind="duplicate"
@@ -729,6 +784,31 @@ def _find_values(value: Any, names: set[str]) -> list[str]:
 def _payload_data(payload: dict[str, Any]) -> dict[str, Any]:
     data = payload.get("data", payload)
     return data if isinstance(data, dict) else {}
+
+
+def _nested_data(payload: dict[str, Any], *, depth: int = 4) -> dict[str, Any]:
+    node: Any = payload
+    for _ in range(depth):
+        if not isinstance(node, dict):
+            return {}
+        if isinstance(node.get("identities"), dict):
+            return node
+        nxt = node.get("data")
+        if not isinstance(nxt, dict):
+            return node
+        node = nxt
+    return node if isinstance(node, dict) else {}
+
+
+def _cli_identity_ready(identity: dict[str, Any] | None, *, user: bool) -> bool:
+    if not isinstance(identity, dict) or not identity.get("available"):
+        return False
+    if str(identity.get("status") or "") != "ready":
+        return False
+    if not user:
+        return True
+    token = identity.get("tokenStatus") or identity.get("token_status")
+    return token in {None, "", "valid"}
 
 
 def _profile_items(payload: dict[str, Any] | list[Any]) -> list[dict[str, Any]]:
@@ -821,7 +901,7 @@ def feishu_identity_context(*, verify: bool = False) -> dict[str, Any]:
     auth_payload = _run_lark(auth_args, retries=1)
     if not isinstance(auth_payload, dict):
         raise LarkCLIError("lark-cli auth status returned an invalid payload", kind="command")
-    auth = _payload_data(auth_payload)
+    auth = _nested_data(auth_payload)
     app_ids = list(
         dict.fromkeys(
             value.strip()
@@ -846,7 +926,7 @@ def feishu_identity_context(*, verify: bool = False) -> dict[str, Any]:
         "user": {
             "available": bool(user.get("available")),
             "status": str(user.get("status") or ""),
-            "token_status": str(user.get("tokenStatus") or ""),
+            "token_status": str(user.get("tokenStatus") or user.get("token_status") or ""),
             "name": str(user.get("userName") or ""),
             "open_id": str(user.get("openId") or ""),
         },
@@ -881,38 +961,24 @@ def verify_feishu_identity(
                 "pin the exact profile before continuing.",
                 kind="wrong_app",
             )
-    auth = _run_lark(["auth", "status", "--json", "--verify"], retries=1)
-    if not isinstance(auth, dict):
-        raise LarkCLIError("lark-cli auth status returned an invalid payload", kind="command")
-    auth_data = auth.get("data", auth)
-    identities = auth_data.get("identities", {}) if isinstance(auth_data, dict) else {}
-    identity_status = (
-        identities.get(selected_identity, {}) if isinstance(identities, dict) else {}
-    )
-    actual_ids = list(dict.fromkeys(_find_values(auth, {"appid"})))
-    if len(actual_ids) != 1 or actual_ids[0] != expected_app_id:
+    context = feishu_identity_context(verify=True)
+    if not context.get("app_id_unambiguous") or context.get("app_id") != expected_app_id:
         raise LarkCLIError(
             "lark-cli could not prove that the active profile uses the confirmed Feishu "
             "App ID. Re-select or initialize the profile, run manage feishu-context, "
             "and confirm by App ID rather than bot display name.",
             kind="wrong_app",
         )
-    if (
-        not isinstance(identity_status, dict)
-        or not identity_status.get("available")
-        or identity_status.get("status") != "ready"
-        or (
-            selected_identity == "user"
-            and identity_status.get("tokenStatus") not in {None, "valid"}
-        )
-    ):
+    identity_status = (
+        context.get("user") if selected_identity == "user" else context.get("bot")
+    )
+    if not _cli_identity_ready(identity_status, user=selected_identity == "user"):
         label = "user authorization" if selected_identity == "user" else "bot identity"
         raise LarkCLIError(
             f"Feishu {label} is not ready. "
             + (
-                "Start split-flow authorization with auth login --domain base --no-wait "
-                "--json, show the URL and QR code, then finish with --device-code in the "
-                "next conversation turn."
+                "Run manage feishu-auth start, open the returned verification URL, "
+                "then run manage feishu-auth complete."
                 if selected_identity == "user"
                 else "Configure the app secret and required backend scopes; do not run user auth."
             ),
@@ -920,8 +986,8 @@ def verify_feishu_identity(
         )
     expected_user_open_id = str(feishu.get("expected_user_open_id") or "").strip()
     if selected_identity == "user" and expected_user_open_id:
-        actual_users = list(dict.fromkeys(_find_values(identity_status, {"openid"})))
-        if not actual_users or expected_user_open_id not in actual_users:
+        actual_open_id = str((identity_status or {}).get("open_id") or "")
+        if actual_open_id != expected_user_open_id:
             raise LarkCLIError(
                 "the authorized Feishu user does not match the user confirmed during "
                 "setup; run manage feishu-context and authorize the intended user",
@@ -985,30 +1051,42 @@ def create_standard_base(
 
 
 def created_base_identifiers(payload: dict[str, Any]) -> tuple[str, str]:
-    base_tokens = list(
-        dict.fromkeys(
-            value.strip()
-            for value in _find_values(
-                payload, {"basetoken", "apptoken", "createdbasetoken"}
-            )
-            if value.strip()
+    def _usable(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        cleaned = value.strip()
+        if not cleaned or cleaned.startswith("<") or ">" in cleaned:
+            return ""
+        return cleaned
+
+    data = payload.get("data", payload)
+    data = data if isinstance(data, dict) else {}
+    base_object = data.get("base") if isinstance(data.get("base"), dict) else {}
+    table_object = data.get("table") if isinstance(data.get("table"), dict) else {}
+    structured_base = _usable(
+        base_object.get("base_token") or base_object.get("app_token")
+    )
+    structured_table = _usable(table_object.get("id") or table_object.get("table_id"))
+    base_tokens = [
+        value
+        for value in (
+            structured_base,
+            *_find_values(payload, {"basetoken", "apptoken", "createdbasetoken"}),
         )
-    )
-    table_ids = list(
-        dict.fromkeys(
-            value.strip()
-            for value in _find_values(
-                payload, {"tableid", "defaulttableid", "createdtableid"}
-            )
-            if value.strip()
+        if _usable(value)
+    ]
+    table_ids = [
+        value
+        for value in (
+            structured_table,
+            *_find_values(payload, {"tableid", "defaulttableid", "createdtableid"}),
         )
-    )
-    base_token = next(
-        (value for value in base_tokens if not value.startswith("<")), ""
-    )
-    table_id = next(
-        (value for value in table_ids if value.startswith("tbl")), ""
-    )
+        if _usable(value)
+    ]
+    base_token = next((value for value in base_tokens if _usable(value)), "")
+    table_id = next((value for value in table_ids if value.startswith("tbl")), "")
+    if not table_id:
+        table_id = next((value for value in table_ids if _usable(value)), "")
     if not base_token or not table_id:
         raise LarkCLIError(
             "the Base may have been created, but lark-cli did not return a usable "
@@ -1018,9 +1096,128 @@ def created_base_identifiers(payload: dict[str, Any]) -> tuple[str, str]:
     return base_token, table_id
 
 
+def created_base_document_url(payload: dict[str, Any]) -> str:
+    data = payload.get("data", payload)
+    data = data if isinstance(data, dict) else {}
+    base_object = data.get("base") if isinstance(data.get("base"), dict) else {}
+    for candidate in (base_object.get("url"), data.get("url"), payload.get("url")):
+        if isinstance(candidate, str) and candidate.strip().startswith("https://"):
+            return candidate.strip()
+    return ""
+
+
+def feishu_document_url(feishu: dict[str, Any]) -> str:
+    stored = str(feishu.get("base_url") or "").strip()
+    table_id = str(feishu.get("table_id") or "").strip()
+    token = str(feishu.get("base_token") or "").strip()
+    if not stored and token:
+        stored = f"https://www.feishu.cn/base/{token}"
+    if not stored:
+        return ""
+    parts = urlsplit(stored)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if table_id and "table" not in query:
+        query["table"] = table_id
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+
+
+def _auth_login_fields(payload: dict[str, Any]) -> dict[str, str]:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        data = payload
+    verification_url = str(
+        data.get("verification_url") or data.get("url") or ""
+    ).strip()
+    if verification_url and not verification_url.startswith("https://"):
+        verification_url = ""
+    expires_in = data.get("expires_in")
+    return {
+        "device_code": str(data.get("device_code") or "").strip(),
+        "verification_url": verification_url,
+        "hint": str(data.get("hint") or "").strip(),
+        "expires_in": "" if expires_in in (None, "") else str(expires_in).strip(),
+    }
+
+
+def start_user_device_login() -> dict[str, str]:
+    payload = _run_lark(
+        [
+            "auth",
+            "login",
+            "--scope",
+            USER_BASE_SCOPES,
+            "--no-wait",
+            "--json",
+        ],
+        retries=1,
+        timeout=90,
+    )
+    if not isinstance(payload, dict):
+        raise LarkCLIError(
+            "lark-cli auth login did not return a JSON object",
+            kind="command",
+        )
+    fields = _auth_login_fields(payload)
+    if not fields["device_code"] or not fields["verification_url"]:
+        raise LarkCLIError(
+            "lark-cli auth login did not return a verification URL; retry "
+            "manage feishu-auth start",
+            kind="authorization",
+        )
+    return fields
+
+
+def complete_user_device_login(device_code: str) -> dict[str, Any]:
+    code = str(device_code or "").strip()
+    if not code or len(code) > 512:
+        raise LarkCLIError(
+            "stored device code is missing; run manage feishu-auth start",
+            kind="authorization",
+        )
+    payload = _run_lark(
+        ["auth", "login", "--device-code", code, "--json"],
+        retries=2,
+        timeout=90,
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def device_login_is_pending(error: LarkCLIError) -> bool:
+    text = str(error).casefold()
+    if any(marker in text for marker in ("expired", "invalid_grant", "invalid device")):
+        return False
+    if error.retryable:
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "authorization_pending",
+            "authorization pending",
+            "not yet",
+            "waiting for",
+            "slow_down",
+            "slow down",
+        )
+    )
+
+
+def device_login_is_expired(error: LarkCLIError) -> bool:
+    text = str(error).casefold()
+    return any(
+        marker in text for marker in ("expired", "invalid_grant", "invalid device")
+    )
+
+
 def preflight_feishu(feishu: dict[str, Any]) -> dict[str, Any]:
-    if not feishu.get("enabled"):
-        raise LarkCLIError("Feishu sync is disabled; complete Agent setup first", kind="config")
+    if not str(feishu.get("base_token") or "").strip() or not str(
+        feishu.get("table_id") or ""
+    ).strip():
+        raise LarkCLIError(
+            "Feishu sync target is not configured; complete Agent setup first",
+            kind="config",
+        )
     identity = str(feishu.get("identity") or "user")
     verify_feishu_identity(feishu, identity=identity)
     fields = list_fields(feishu["base_token"], feishu["table_id"], identity=identity)

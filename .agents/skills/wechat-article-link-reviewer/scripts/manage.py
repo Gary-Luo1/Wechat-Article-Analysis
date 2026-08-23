@@ -20,13 +20,19 @@ from urllib.parse import parse_qs, urlparse
 from article_inbox import queue_summary
 from bitable_client import (
     LarkCLIError,
+    complete_user_device_login,
     create_standard_base,
+    created_base_document_url,
     created_base_identifiers,
+    device_login_is_expired,
+    device_login_is_pending,
+    feishu_document_url,
     feishu_identity_context,
     lark_cli_info,
     preflight_feishu,
     resolve_lark_profile,
     standard_field_schema,
+    start_user_device_login,
     verify_feishu_identity,
 )
 from config_store import (
@@ -70,12 +76,47 @@ ACTION_LABELS = {
     "select_feishu_app": "选择并固定本技能要使用的飞书 App ID",
     "configure_private_lark_profile": "在技能私有目录中配置已选飞书应用",
     "configure_existing_feishu_target": "配置一个明确的现有飞书目标表格",
+    "open_verification_url_then_complete_feishu_auth": "打开验证 URL，用户授权后运行 feishu-auth complete",
     "rerun_with_yes": "确认后重新运行本次命令",
 }
 
 
 def _authorization(config: dict[str, Any]) -> dict[str, Any]:
     return config["setup"]["feishu_authorization"]
+
+
+def _public_authorization(authorization: dict[str, Any]) -> dict[str, Any]:
+    visible = dict(authorization)
+    visible.pop("device_code", None)
+    return visible
+
+
+def waiting_login_is_resumable(authorization: dict[str, Any]) -> bool:
+    return (
+        authorization.get("state") == "waiting"
+        and str(authorization.get("verification_url") or "").strip().startswith("https://")
+        and bool(str(authorization.get("device_code") or "").strip())
+    )
+
+
+def created_target_is_resumable(feishu: dict[str, Any]) -> bool:
+    return (
+        feishu.get("provisioning") == "created"
+        and bool(str(feishu.get("base_token") or "").strip())
+        and bool(str(feishu.get("table_id") or "").strip())
+    )
+
+
+def complete_authorization_action(
+    *, identity_ready: bool, error: LarkCLIError | None
+) -> str:
+    if error is not None:
+        if device_login_is_expired(error):
+            return "expired"
+        if device_login_is_pending(error) or error.retryable:
+            return "keep_waiting"
+        return "raise"
+    return "authorized" if identity_ready else "keep_waiting"
 
 
 def _set_manager_access(
@@ -327,6 +368,7 @@ def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 "enabled": True,
                 "base_token": base_token,
                 "table_id": table_id,
+                "base_url": raw.strip(),
                 "provisioning": "existing",
                 "created_base_name": "",
                 "created_table_name": "",
@@ -338,9 +380,12 @@ def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         return config
 
     modify_config(mutate)
+    bound = load_config()["feishu"]
     return {
         **preview,
         "configured": True,
+        "document_url": feishu_document_url(bound),
+        "resource_tokens_included": False,
     }, "authorize_and_run_feishu_check"
 
 
@@ -631,7 +676,7 @@ def _feishu_identity(identity: str) -> dict[str, Any]:
             if identity == "user"
             else "use bot credentials and backend scopes; never start user authorization"
         ),
-        "authorization": dict(_authorization(config)),
+        "authorization": _public_authorization(_authorization(config)),
     }
 
 
@@ -766,11 +811,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         )
     has_token = bool(str(config["feishu"].get("base_token") or "").strip())
     has_table = bool(str(config["feishu"].get("table_id") or "").strip())
-    resuming = (
-        config["feishu"].get("provisioning") == "created"
-        and has_token
-        and has_table
-    )
+    resuming = created_target_is_resumable(config["feishu"])
     schema = standard_field_schema()
     base_name = " ".join(str(arguments.name).split())
     table_name = " ".join(str(arguments.table_name).split())
@@ -850,6 +891,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
     if resuming:
         base_token = str(config["feishu"]["base_token"])
         table_id = str(config["feishu"]["table_id"])
+        document_url = feishu_document_url(config["feishu"])
     else:
         payload = create_standard_base(
             base_name,
@@ -857,6 +899,12 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             identity=identity,
         )
         base_token, table_id = created_base_identifiers(payload)
+        document_url = feishu_document_url(
+            {
+                "base_url": created_base_document_url(payload),
+                "table_id": table_id,
+            }
+        )
 
     # Persist the recovery anchor before any external permission/schema step,
     # so a later failure can resume from this exact state.
@@ -866,6 +914,8 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
                 "enabled": False,
                 "base_token": base_token,
                 "table_id": table_id,
+                "base_url": document_url
+                or str(config["feishu"].get("base_url") or "").strip(),
                 "provisioning": "created",
                 "field_mapping": {},
                 "created_base_name": str(
@@ -904,6 +954,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "field_mapping_saved": True,
         "resumed_existing": resuming,
         "authorization_source": "current_command",
+        "document_url": feishu_document_url(config["feishu"]) or document_url,
     }, "none"
 
 
@@ -958,6 +1009,7 @@ def _save_authorization_state(
     *,
     started: bool = False,
     completed: bool = False,
+    extras: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
 
@@ -972,10 +1024,18 @@ def _save_authorization_state(
             authorization["completed_at"] = now
         if state in {"waiting", "expired", "failed", "not_started"}:
             authorization["completed_at"] = ""
+        if extras:
+            for key, value in extras.items():
+                authorization[key] = value
+        if state != "waiting":
+            authorization["device_code"] = ""
+            authorization["verification_url"] = ""
+            authorization["hint"] = ""
+            authorization["expires_in"] = ""
         return config
 
     config = modify_config(mutate)
-    return dict(_authorization(config))
+    return _public_authorization(_authorization(config))
 
 
 def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
@@ -983,25 +1043,39 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     if not config["setup"]["feishu_identity_confirmed"]:
         return {
             "identity_confirmed": False,
-            "authorization": dict(_authorization(config)),
+            "authorization": _public_authorization(_authorization(config)),
         }, "ask_feishu_identity_before_authorization"
     identity = config["feishu"]["identity"]
     authorization = _authorization(config)
     if arguments.auth_command == "status":
+        authorization_verified = False
+        if identity == "user" and authorization.get("state") == "authorized":
+            try:
+                authorization_verified = _identity_ready(
+                    feishu_identity_context(verify=True), "user"
+                )
+            except LarkCLIError:
+                authorization_verified = False
+        elif identity == "bot":
+            authorization_verified = True
+        if authorization["state"] == "waiting":
+            next_action = "open_verification_url_then_complete_feishu_auth"
+        elif identity == "user" and not authorization_verified:
+            next_action = "run_feishu_auth_start"
+        else:
+            next_action = "none"
         return {
             "identity": identity,
-            "authorization": dict(authorization),
+            "authorization": _public_authorization(authorization),
+            "authorization_verified": authorization_verified,
             "secrets_included": False,
-        }, (
-            "resume_existing_user_base_authorization"
-            if authorization["state"] == "waiting"
-            else "none"
-        )
+            "verification_url": authorization.get("verification_url") or "",
+        }, next_action
     if arguments.auth_command == "expire":
         if not arguments.yes:
             return {
                 "preview": "mark the current user authorization flow expired",
-                "authorization": dict(authorization),
+                "authorization": _public_authorization(authorization),
             }, "rerun_with_yes"
         return {
             "identity": identity,
@@ -1015,17 +1089,18 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             "user_authorization_started": False,
         }, "configure_bot_credentials_and_scopes_without_user_auth"
     if arguments.auth_command == "start":
-        if authorization["state"] == "waiting":
+        if waiting_login_is_resumable(authorization):
             return {
                 "identity": identity,
-                "authorization": dict(authorization),
+                "authorization": _public_authorization(authorization),
                 "new_authorization_started": False,
-            }, "resume_existing_user_base_authorization"
+                "verification_url": authorization.get("verification_url") or "",
+            }, "open_verification_url_then_complete_feishu_auth"
         context = feishu_identity_context(verify=True)
         if context.get("app_id_unambiguous") is False:
             return {
                 "identity": identity,
-                "authorization": dict(authorization),
+                "authorization": _public_authorization(authorization),
                 "new_authorization_started": False,
             }, "select_or_initialize_feishu_profile"
         if _identity_ready(context, "user"):
@@ -1036,19 +1111,30 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 "new_authorization_started": False,
                 "existing_authorization_reused": True,
             }, "confirm_feishu_app_and_user"
-        state = _save_authorization_state("waiting", started=True)
+        fields = start_user_device_login()
+        state = _save_authorization_state(
+            "waiting",
+            started=True,
+            extras={
+                "device_code": fields["device_code"],
+                "verification_url": fields["verification_url"],
+                "hint": fields.get("hint") or "",
+                "expires_in": fields.get("expires_in") or "",
+            },
+        )
         return {
             "identity": identity,
             "authorization": state,
             "new_authorization_started": True,
-            "authorization_command": "lark auth login --domain base --no-wait --json",
-            "device_code_persisted": False,
-        }, "start_single_user_base_authorization"
+            "verification_url": fields["verification_url"],
+            "device_code_persisted": True,
+            "secrets_included": False,
+        }, "open_verification_url_then_complete_feishu_auth"
     context = feishu_identity_context(verify=True)
     if context.get("app_id_unambiguous") is False:
         return {
             "identity": identity,
-            "authorization": dict(authorization),
+            "authorization": _public_authorization(authorization),
             "authorization_verified": False,
         }, "select_or_initialize_feishu_profile"
     if _identity_ready(context, "user"):
@@ -1061,17 +1147,54 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     if authorization["state"] != "waiting":
         return {
             "identity": identity,
-            "authorization": dict(authorization),
+            "authorization": _public_authorization(authorization),
             "authorization_verified": False,
             "new_authorization_started": False,
         }, "run_feishu_auth_start"
-    state = dict(authorization)
+    device_code = str(authorization.get("device_code") or "").strip()
+    if not device_code:
+        return {
+            "identity": identity,
+            "authorization": _public_authorization(authorization),
+            "authorization_verified": False,
+        }, "run_feishu_auth_start"
+    try:
+        complete_user_device_login(device_code)
+    except LarkCLIError as exc:
+        action = complete_authorization_action(identity_ready=False, error=exc)
+        if action == "keep_waiting":
+            return {
+                "identity": identity,
+                "authorization": _public_authorization(authorization),
+                "authorization_verified": False,
+                "verification_url": authorization.get("verification_url") or "",
+            }, "open_verification_url_then_complete_feishu_auth"
+        if action == "expired":
+            return {
+                "identity": identity,
+                "authorization": _save_authorization_state("expired"),
+                "authorization_verified": False,
+            }, "run_feishu_auth_start"
+        raise
+    context = feishu_identity_context(verify=True)
+    action = complete_authorization_action(
+        identity_ready=_identity_ready(context, "user"),
+        error=None,
+    )
+    if action != "authorized":
+        return {
+            "identity": identity,
+            "authorization": _public_authorization(authorization),
+            "authorization_verified": False,
+            "verification_url": authorization.get("verification_url") or "",
+        }, "open_verification_url_then_complete_feishu_auth"
+    state = _save_authorization_state("authorized", completed=True)
     return {
         "identity": identity,
         "authorization": state,
-        "authorization_verified": False,
+        "authorization_verified": True,
         "new_authorization_started": False,
-    }, "finish_existing_user_base_authorization"
+    }, "confirm_feishu_app_and_user"
 
 
 def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
@@ -1169,8 +1292,11 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 "manager_open_id": "",
                 "base_token": "",
                 "table_id": "",
+                "base_url": "",
                 "field_mapping": {},
                 "provisioning": "",
+                "created_base_name": "",
+                "created_table_name": "",
             })
             _reset_manager_access(config)
             config["health"] = validate_config(DEFAULT_CONFIG)["health"]
