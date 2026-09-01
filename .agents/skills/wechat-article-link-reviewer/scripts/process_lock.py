@@ -28,8 +28,12 @@ def process_lock(path: Path, timeout: float = 10.0) -> Iterator[None]:
                 if os.name == "nt":
                     import msvcrt
 
-                    handle.seek(0)
-                    if handle.tell() == 0:
+                    # msvcrt.locking locks bytes from the current position, so
+                    # byte 0 must exist. The file is opened in append mode where
+                    # writes always land at the end: seed it only when it is
+                    # truly empty (fstat, not seek/tell) or every acquisition
+                    # would grow the lock file by one byte.
+                    if os.fstat(handle.fileno()).st_size == 0:
                         handle.write(b"0")
                         handle.flush()
                     handle.seek(0)

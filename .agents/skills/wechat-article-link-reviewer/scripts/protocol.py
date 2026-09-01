@@ -74,8 +74,7 @@ def failure(exc: Exception, *, message: str | None = None) -> dict:
             "next_action": NEXT_ACTIONS.get(code, "inspect_command_help"),
         },
     }
-    if code.startswith(("ARTICLE_", "WECHAT_")) or code in {
-    }:
+    if code.startswith("ARTICLE_"):
         details = getattr(exc, "details", None)
         if isinstance(details, dict):
             envelope["error"]["details"] = details

@@ -17,6 +17,7 @@ from lark_runtime import (
     lark_cli_config_dir,
     lark_cli_environment,
     lark_cli_home_dir,
+    lark_cli_install_dir,
     lark_cli_work_dir,
     resolve_lark_cli,
     safe_lark_arguments,
@@ -188,8 +189,9 @@ def _lark_cli() -> str:
         return str(resolve_lark_cli())
     except FileNotFoundError as exc:
         raise LarkCLIError(
-            "lark-cli is not installed. Ask for permission, then install @larksuite/cli "
-            "in the application state directory and resume Feishu setup.",
+            "lark-cli is not installed. Ask for permission, then install it in the "
+            f"isolated state directory with `npm install --prefix "
+            f"{lark_cli_install_dir()} @larksuite/cli` and resume Feishu setup.",
             kind="missing_cli",
         ) from exc
 
@@ -290,8 +292,13 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
         if permission_violations
         else ""
     )
+    # lark-cli fills subtype with "unknown" for unclassified API errors; only
+    # meaningful subtypes belong in the surfaced message.
+    informative_subtype = subtype if subtype not in {"", "unknown", "error", "api"} else ""
     combined = " ".join(
-        part for part in (message, subtype, hint, violations_text, console_url) if part
+        part
+        for part in (message, informative_subtype, hint, violations_text, console_url)
+        if part
     )
     lower = combined.casefold()
     if error_type == "confirmation_required" or (
@@ -364,6 +371,27 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
             for marker in ("timeout", "temporarily", "connection reset", "rate limit", "try again")
         )
     )
+    if error_type == "deleted" or any(
+        marker in lower
+        for marker in (
+            "has been deleted",
+            "have been deleted",
+            "was deleted",
+            "not exist",
+            "no longer exist",
+            "moved to trash",
+        )
+    ):
+        return LarkCLIError(
+            _redact_cli_error(
+                "the Feishu resource (Base or table) no longer exists on the Feishu "
+                "side; it was deleted or moved to trash"
+                + (f" (code {code})" if code not in (None, "") else ""),
+                args,
+            ),
+            kind="target_deleted",
+            code=code,
+        )
     return LarkCLIError(
         _redact_cli_error(combined or "lark-cli request failed", args),
         kind="transient" if retryable else "api",
@@ -663,7 +691,7 @@ def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[s
     return {
         "title": str(article.get("title", "")),
         "account": str(article.get("account", "")),
-        "account_id": str(article.get("account_id", article.get("account", ""))),
+        "account_id": str(article.get("account_id") or article.get("account", "")),
         "url": _https_wechat_url(article.get("link", "")),
         "summary": str(metadata.get("summary") or article.get("digest", ""))[:500],
         "published_at": _datetime_value(article.get("update_time")),
@@ -1220,7 +1248,19 @@ def preflight_feishu(feishu: dict[str, Any]) -> dict[str, Any]:
         )
     identity = str(feishu.get("identity") or "user")
     verify_feishu_identity(feishu, identity=identity)
-    fields = list_fields(feishu["base_token"], feishu["table_id"], identity=identity)
+    try:
+        fields = list_fields(feishu["base_token"], feishu["table_id"], identity=identity)
+    except LarkCLIError as exc:
+        if exc.kind == "target_deleted":
+            raise LarkCLIError(
+                "the configured Feishu target no longer exists on the Feishu side "
+                "(deleted or moved to trash). Restore the Base from Feishu trash, or "
+                "run `manage reset --scope feishu --yes` and redo the Feishu setup to "
+                "bind or create a new target.",
+                kind="target_deleted",
+                code=exc.code,
+            ) from exc
+        raise
     mapping = resolve_field_mapping(fields, feishu.get("field_mapping"))
     return {
         "identity": identity,

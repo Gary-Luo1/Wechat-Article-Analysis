@@ -22,7 +22,7 @@ def _venv_python() -> Path:
     return root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def _system_runtime_is_ready(command: str) -> bool:
+def _system_runtime_is_ready() -> bool:
     try:
         __import__("curl_cffi")
         __import__("requests")
@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     preferred = _venv_python()
     if preferred.exists() and _interpreter_is_ready(preferred):
         interpreter = preferred
-    elif _system_runtime_is_ready(command):
+    elif _system_runtime_is_ready():
         interpreter = Path(sys.executable)
     else:
         print(

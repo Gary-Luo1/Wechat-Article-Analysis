@@ -17,6 +17,11 @@ ALLOWED_HOST = "mp.weixin.qq.com"
 def is_wechat_article_url(url: str) -> bool:
     """Return whether the URL is an exact-host WeChat article URL."""
     try:
+        # urlsplit silently strips tab/newline/CR characters, so control
+        # characters must be rejected on the raw input before parsing; the
+        # decoded-path check below would otherwise never see them.
+        if any(ord(character) < 32 or ord(character) == 127 for character in url):
+            return False
         parsed = urllib.parse.urlsplit(url)
         raw_path = parsed.path
         decoded_path = raw_path

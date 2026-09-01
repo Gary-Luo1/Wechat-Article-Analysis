@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from copy import deepcopy
 import io
 import json
 import logging
@@ -31,7 +30,6 @@ from queue_helpers import (
     get_processed_entry,
     add_pending_with_verified_read,
     pending_sync_entries,
-    read_queue,
     has_verified_read,
     record_verified_read,
     resolve_pending,
@@ -90,20 +88,25 @@ class BatchRiskControlError(ValueError):
         }
 
 
+def _first_non_retryable(failures: list[Exception]) -> Exception:
+    """Prefer the first non-retryable failure so automation keeps its code."""
+    return next(
+        (item for item in failures if not bool(getattr(item, "retryable", False))),
+        failures[0],
+    )
+
+
+def _all_retryable(failures: list[Exception]) -> bool:
+    return all(bool(getattr(item, "retryable", False)) for item in failures)
+
+
 class BatchReadError(ValueError):
     """Summarize batch item failures without losing their retry semantics."""
 
     def __init__(self, failures: list[Exception], successful: int) -> None:
-        primary = next(
-            (
-                failure
-                for failure in failures
-                if not bool(getattr(failure, "retryable", False))
-            ),
-            failures[0],
-        )
+        primary = _first_non_retryable(failures)
         self.code = str(getattr(primary, "code", "ARTICLE_FETCH_FAILED"))
-        self.retryable = all(bool(getattr(failure, "retryable", False)) for failure in failures)
+        self.retryable = _all_retryable(failures)
         self.next_action = str(getattr(primary, "next_action", "inspect_failed_items"))
         failure_codes = [
             str(getattr(failure, "code", "ARTICLE_FETCH_FAILED"))
@@ -442,31 +445,64 @@ def _raise_sync_failures(failures: list[Exception], *, prefix: str) -> None:
     """Preserve the first non-retryable failure classification for automation."""
     if not failures:
         return
-    primary = next(
-        (
-            item
-            for item in failures
-            if not bool(getattr(item, "retryable", False))
-        ),
-        failures[0],
-    )
+    primary = _first_non_retryable(failures)
     message = f"{prefix}; {len(failures)} item(s) remain pending; first failure: {primary}"
     if isinstance(primary, LarkCLIError):
         raise LarkCLIError(
             message,
             kind=primary.kind,
             code=primary.code,
-            retryable=all(bool(getattr(item, "retryable", False)) for item in failures),
+            retryable=_all_retryable(failures),
         ) from primary
     if isinstance(primary, ConfigError):
         raise ConfigError(message) from primary
     raise ValueError(message) from primary
 
 
+def _done_already_processed(
+    processed: dict[str, Any], arguments: argparse.Namespace
+) -> int:
+    """Report an already-completed article idempotently."""
+    metadata = processed.get("metadata", {})
+    if metadata.get("disposition") == "dismissed":
+        raise LookupError(
+            "article was dismissed and cannot be completed; restore it first"
+        )
+    if arguments.feishu:
+        raise LookupError(
+            "article is already processed; write it with sync-feishu --link"
+        )
+    title = processed["article"].get("title", "")
+    score = metadata.get("score")
+    if metadata.get("ad"):
+        print(f"Skipped advertisement: {title}")
+    elif isinstance(score, (int, float)):
+        print(f"Completed: {title} (score {score})")
+    else:
+        print(f"Already processed: {title}")
+    if processed.get("sync_status") == "synced":
+        document_url = _feishu_document_url()
+        if document_url:
+            print(f"Feishu: {document_url}")
+    return 0
+
+
 def cmd_done(arguments: argparse.Namespace) -> int:
     if arguments.force_feishu and not arguments.feishu:
         raise ValueError("--force-feishu requires --feishu")
-    article = _resolve(arguments)
+    processed = get_processed_entry(arguments.link)
+    if processed is not None:
+        return _done_already_processed(processed, arguments)
+    try:
+        article = _resolve(arguments)
+    except LookupError:
+        # A concurrent command may have completed the article between the
+        # processed check above and the pending resolve; re-check before
+        # reporting a misleading ARTICLE_NOT_FOUND.
+        processed = get_processed_entry(arguments.link)
+        if processed is None:
+            raise
+        return _done_already_processed(processed, arguments)
     if arguments.ad:
         if arguments.dry_run and not arguments.feishu:
             raise ValueError("--dry-run is only valid together with --feishu")
@@ -513,8 +549,6 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         print(f"Dry run succeeded; article remains pending: {article.get('title', '')}")
         return 0
     entry = complete_article(article["link"], metadata, sync_status=status)
-    if entry.get("metadata", {}).get("disposition") == "dismissed":
-        raise LookupError("article was dismissed and cannot be completed")
     if status == "pending":
         try:
             _sync_entry(entry, dry_run=arguments.dry_run)
@@ -816,6 +850,7 @@ def main(argv: list[str] | None = None) -> int:
                 "restore",
                 "digest-plan",
                 "feishu-check",
+                "feishu-schema",
             } and len(lines) == 1:
                 try:
                     command_data = json.loads(lines[0])
@@ -855,7 +890,9 @@ def main(argv: list[str] | None = None) -> int:
                 }
             print(dump(envelope))
         return result
-    except (ConfigError, LarkCLIError, LookupError, ValueError) as exc:
+    except (ConfigError, LarkCLIError, LookupError, ValueError, OSError) as exc:
+        # Filesystem failures (unwritable export path, state-dir permissions)
+        # must still produce the machine-readable envelope in JSON mode.
         if json_output:
             print(dump(failure(exc)))
         else:

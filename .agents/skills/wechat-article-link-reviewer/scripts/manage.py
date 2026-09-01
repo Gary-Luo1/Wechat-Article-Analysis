@@ -28,7 +28,7 @@ from bitable_client import (
     device_login_is_pending,
     feishu_document_url,
     feishu_identity_context,
-    lark_cli_info,
+    list_fields,
     preflight_feishu,
     resolve_lark_profile,
     standard_field_schema,
@@ -45,7 +45,7 @@ from config_store import (
     validate_config,
 )
 from feishu_target import production_feishu_target
-from paths import config_path, data_dir, lock_path, queue_path, venv_dir
+from paths import APP_NAME, config_path, data_dir, lock_path, queue_path, venv_dir
 from lark_runtime import (
     discover_global_lark_profiles,
     import_global_lark_profile,
@@ -152,8 +152,6 @@ def _reset_authorization(config: dict[str, Any], identity: str) -> None:
 def _progress(
     config: dict[str, Any] | None,
     *,
-    config_exists: bool,
-    config_valid: bool,
     next_action: str,
 ) -> dict[str, Any]:
     """Report only the optional Feishu setup remaining in link-review mode."""
@@ -186,7 +184,7 @@ def _progress(
     }
 
 
-def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
+def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
     """Diagnose only the public-link runtime and optional Feishu target."""
     report: dict[str, Any] = {
         "runtime": {
@@ -223,18 +221,13 @@ def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
         except Exception as exc:
             update_health("feishu", success=False, failure_kind=getattr(exc, "kind", type(exc).__name__))
             report["online"] = {"feishu": failure(exc)["error"]}
-    report["progress"] = _progress(
-        config,
-        config_exists=config is not None,
-        config_valid=config is not None,
-        next_action="provide_article_link",
-    )
+    report["progress"] = _progress(config, next_action="provide_article_link")
     report["setup_stage"] = "link_review_ready"
     return report, "provide_article_link"
 
 
 def _status() -> tuple[dict[str, Any], str]:
-    report, next_action = _doctor(online=False, save_resolved=False)
+    report, next_action = _doctor(online=False)
     return {
         "mode": report["mode"],
         "queue": report["queue"],
@@ -245,10 +238,10 @@ def _status() -> tuple[dict[str, Any], str]:
         ),
     }, next_action
 
+
 def _expected_app_id(config: dict[str, Any]) -> str:
     """Return the saved Feishu App ID, normalized."""
     return str(config["feishu"].get("expected_app_id") or "").strip()
-
 
 
 AGENT_SOURCE_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -353,8 +346,6 @@ def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     }
     if not arguments.yes:
         return {"preview": preview, "configured": False}, "rerun_with_yes"
-
-    state: dict[str, Any] = {}
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
         previous = deepcopy(config["feishu"])
@@ -704,6 +695,7 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
                     "manager_open_id": "",
                     "base_token": "",
                     "table_id": "",
+                    "base_url": "",
                     "provisioning": "",
                     "field_mapping": {},
                 }
@@ -888,6 +880,22 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             kind="confirmation",
         )
     verify_feishu_identity(config["feishu"], identity=identity)
+    recreated_after_deletion = False
+    if resuming:
+        try:
+            list_fields(
+                str(config["feishu"]["base_token"]),
+                str(config["feishu"]["table_id"]),
+                identity=identity,
+            )
+        except LarkCLIError as exc:
+            if exc.kind != "target_deleted":
+                raise
+            # The recorded Base is gone on the Feishu side, so there is nothing
+            # to resume and a fresh create cannot duplicate it. The exact-name
+            # and manager-approval checks above still gate this path.
+            resuming = False
+            recreated_after_deletion = True
     if resuming:
         base_token = str(config["feishu"]["base_token"])
         table_id = str(config["feishu"]["table_id"])
@@ -953,6 +961,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "separate_manager_grant_performed": False,
         "field_mapping_saved": True,
         "resumed_existing": resuming,
+        "recreated_after_deletion": recreated_after_deletion,
         "authorization_source": "current_command",
         "document_url": feishu_document_url(config["feishu"]) or document_url,
     }, "none"
@@ -1197,6 +1206,18 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     }, "confirm_feishu_app_and_user"
 
 
+def _feishu_disable(*, yes: bool) -> tuple[dict[str, Any], str]:
+    if not yes:
+        return {"preview": "disable Feishu sync; no Base data is deleted"}, "rerun_with_yes"
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        config["feishu"]["enabled"] = False
+        return config
+
+    modify_config(mutate)
+    return {"disabled": True, "base_data_deleted": False}, "none"
+
+
 def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     config = load_config()
     current = config["preferences"]
@@ -1242,6 +1263,65 @@ def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     return {"preferences": saved["preferences"], "updated_fields": sorted(updates)}, "generate_digest_plan"
 
 
+# The all-data wipe enumerates every child of the state directory. Refuse
+# well-known shared/system directory names regardless of override, and refuse
+# any directory that contains no known application artifact.
+RESET_SHARED_ROOT_NAMES = {
+    "tmp",
+    "temp",
+    "var",
+    "etc",
+    "usr",
+    "opt",
+    "srv",
+    "bin",
+    "sbin",
+    "library",
+    "system",
+    "windows",
+    "users",
+    "home",
+    "shared",
+    "public",
+    "desktop",
+    "documents",
+    "downloads",
+}
+RESET_STATE_ARTIFACTS = (
+    "config.json",
+    "queue.json",
+    "config.lock",
+    "queue.lock",
+    "venv",
+    "lark-cli",
+    "lark-cli-config",
+    "lark-cli-home",
+    "lark-cli-work",
+)
+
+
+def _reset_root_is_dangerous(resolved_root: Path) -> bool:
+    if resolved_root == resolved_root.parent:
+        return True
+    if resolved_root == Path.home().resolve():
+        return True
+    if resolved_root.name.casefold() in RESET_SHARED_ROOT_NAMES:
+        return True
+    if not resolved_root.is_dir():
+        return False
+    try:
+        children = list(resolved_root.iterdir())
+    except OSError:
+        return True
+    if not children:
+        return False
+    if resolved_root.name == APP_NAME:
+        return False
+    return not any(
+        (resolved_root / artifact).exists() for artifact in RESET_STATE_ARTIFACTS
+    )
+
+
 def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     scope = arguments.scope
     targets: list[Path] = []
@@ -1249,6 +1329,11 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         targets.extend([queue_path(), lock_path()])
     if scope == "all-data":
         root = config_path().parent
+        if _reset_root_is_dangerous(root.resolve()):
+            raise ValueError(
+                "refusing all-data reset: the state directory is not a "
+                "dedicated application directory"
+            )
         targets.append(config_path())
         for pattern in (
             "config.v*.backup.json",
@@ -1405,7 +1490,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         next_action = "none"
         if arguments.command == "doctor":
-            data, next_action = _doctor(online=arguments.online, save_resolved=False)
+            data, next_action = _doctor(online=arguments.online)
         elif arguments.command == "status":
             data, next_action = _status()
         elif arguments.command == "config-show":
@@ -1444,15 +1529,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "preferences":
             data, next_action = _preferences(arguments)
         elif arguments.command == "feishu-disable":
-            if not arguments.yes:
-                data, next_action = {"preview": "disable Feishu sync; no Base data is deleted"}, "rerun_with_yes"
-            else:
-                def mutate_disable(config: dict[str, Any]) -> dict[str, Any]:
-                    config["feishu"]["enabled"] = False
-                    return config
-
-                modify_config(mutate_disable)
-                data = {"disabled": True, "base_data_deleted": False}
+            data, next_action = _feishu_disable(yes=arguments.yes)
         else:
             data, next_action = _reset(arguments)
         envelope = success(data, next_action=next_action)

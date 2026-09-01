@@ -106,15 +106,16 @@ def _get_with_safe_redirects(
             allow_redirects=False,
             stream=True,
         )
-        # curl_cffi does not expose requests-style redirect flags; treat a
-        # Location header as the portable redirect signal.
-        if getattr(response, "is_redirect", False) or getattr(
-            response, "is_permanent_redirect", False
-        ) or response.headers.get("Location"):
+        # curl_cffi does not expose requests-style redirect flags. Follow only
+        # real 3xx redirects: a 2xx response may legally carry a Location header
+        # (e.g. 201 Created) and must be treated as the final response.
+        status_code = getattr(response, "status_code", 0)
+        is_redirect = isinstance(status_code, int) and 300 <= status_code < 400
+        if is_redirect:
             location = response.headers.get("Location")
             response.close()
             if not location:
-                raise requests.RequestException("redirect response has no Location header")
+                raise ArticleHTTPError(status_code)
             current = _validate_url(urllib.parse.urljoin(current, location))
             continue
         return response
@@ -250,8 +251,15 @@ def fetch_article(
                         raise ArticleHTTPError(status_code)
                 response.raise_for_status()
                 content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) > max_bytes:
-                    raise ArticleResponseTooLargeError("article response exceeds size limit")
+                if content_length:
+                    try:
+                        declared_length = int(content_length)
+                    except ValueError:
+                        declared_length = -1
+                    if declared_length < 0 or declared_length > max_bytes:
+                        raise ArticleResponseTooLargeError(
+                            "article response exceeds size limit"
+                        )
                 payload = bytearray()
                 for chunk in response.iter_content(chunk_size=64 * 1024):
                     payload.extend(chunk)
