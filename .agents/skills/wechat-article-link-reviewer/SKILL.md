@@ -1,6 +1,6 @@
 ---
 name: wechat-article-link-reviewer
-description: Read, evaluate, queue, export, and optionally sync a user-supplied WeChat Official Account article to Feishu Base, with a guided post-review confirmation before external writing. Use when a user sends a mp.weixin.qq.com article link or asks to score, summarize, tag, or sync that article. Requires a local Python runtime and network access.
+description: Read, evaluate, queue, export, and optionally sync a user-supplied WeChat Official Account article to Feishu Base, with a guided post-review confirmation before external writing. Use when a user sends a mp.weixin.qq.com article link or asks to score, summarize, tag, or sync that article, or says 审阅/评分/总结这篇公众号文章 or 把这篇文章写入飞书表格. Requires a local Python runtime and network access.
 ---
 
 # WeChat Article Link Reviewer
@@ -58,7 +58,10 @@ article.
   feishu-check. `feishu-auth start` actually starts login and persists the device
   code locally; never echo the device code. Successful create/check/write returns
   an openable Base URL, not raw tokens. If provisioning is already `created`,
-  resume that Base instead of creating another.
+  resume that Base instead of creating another; if the resume probe finds the
+  recorded Base was deleted on the Feishu side, `feishu-create-base` creates a
+  fresh Base automatically (same exact-name and manager-approval gates) and
+  reports `recreated_after_deletion: true`.
 - If the user has already made these choices in the current task, do not ask
   them again; verify the saved target and continue.
 

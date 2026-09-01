@@ -47,8 +47,12 @@ process feishu-check --save-mapping
 
 If `provisioning=created` and tokens already exist, `feishu-create-base` resumes
 that Base and returns its `document_url`; do not create another Base with the
-same names. Extra empty Bases created by earlier failed retries cannot be listed
-or deleted without extra Drive scopes; ignore them and keep the stored URL.
+same names. When the resume probe finds the recorded Base was deleted on the
+Feishu side, the command creates a fresh Base instead of failing, still gated by
+the exact-name and manager-approval checks, and reports
+`recreated_after_deletion: true`. Extra empty Bases created by earlier failed
+retries cannot be listed or deleted without extra Drive scopes; ignore them and
+keep the stored URL.
 
 ```text
 manage feishu-destination --mode existing|create|skip

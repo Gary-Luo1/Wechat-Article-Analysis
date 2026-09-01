@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    env:
+      WECHAT_ARTICLE_HOME: ${{ runner.temp }}/skill-state
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: python -m pip install -r .agents/skills/wechat-article-link-reviewer/requirements.txt
+      - name: Compile all skill modules
+        run: python -m compileall -q .agents/skills/wechat-article-link-reviewer/scripts
+      - name: Runtime smoke test (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n .agents/skills/wechat-article-link-reviewer/scripts/run.sh
+          WECHAT_ARTICLE_PYTHON=$(command -v python) \
+            bash .agents/skills/wechat-article-link-reviewer/scripts/run.sh manage --format json status
+      - name: Runtime smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:WECHAT_ARTICLE_PYTHON = (Get-Command python).Source
+          & .agents/skills/wechat-article-link-reviewer/scripts/run.ps1 manage --format json status
