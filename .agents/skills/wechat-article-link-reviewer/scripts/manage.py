@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from article_cache import article_cache_dir, clear_article_cache
 from article_inbox import queue_summary
 from bitable_client import (
     LarkCLIError,
@@ -54,31 +55,96 @@ from lark_runtime import (
 from protocol import dump, failure, success
 
 
-STEP_LABELS = {
-    "feishu_destination": "确认是否写入飞书多维表格",
-    "feishu_identity": "选择飞书执行身份",
-    "feishu_authorization": "完成飞书身份授权",
-    "feishu_target": "确认飞书目标表格",
-    "feishu_validation": "验证飞书身份与目标表格",
-}
+def _target_configured(feishu: dict[str, Any]) -> bool:
+    return bool(str(feishu.get("base_token") or "").strip()) and bool(
+        str(feishu.get("table_id") or "").strip()
+    )
 
-ACTION_LABELS = {
-    "ask_user_for_feishu_destination": "选择跳过飞书、映射现有多维表格或创建新表",
-    "import_current_feishu_bot_context": "从当前飞书机器人会话验证 App ID 和发送者上下文",
-    "bind_detected_feishu_bot": "绑定当前飞书会话的机器人应用",
-    "repair_local_config_file": "修复本地配置文件中的 JSON 或字段错误",
-    "ask_feishu_identity_before_authorization": "选择个人用户或机器人身份",
-    "run_feishu_auth_start": "检查现有飞书授权；仅在缺失时发起一次授权",
-    "resume_existing_user_base_authorization": "继续当前飞书授权，不要重新发起",
-    "check_or_install_lark_cli": "检查或安装兼容的飞书 CLI",
-    "install_compatible_lark_cli": "安装兼容的飞书 CLI 版本",
-    "authorize_and_run_feishu_check": "完成飞书只读检查",
-    "select_feishu_app": "选择并固定本技能要使用的飞书 App ID",
-    "configure_private_lark_profile": "在技能私有目录中配置已选飞书应用",
-    "configure_existing_feishu_target": "配置一个明确的现有飞书目标表格",
-    "open_verification_url_then_complete_feishu_auth": "打开验证 URL，用户授权后运行 feishu-auth complete",
-    "rerun_with_yes": "确认后重新运行本次命令",
-}
+
+def _setup_next_action(config: dict[str, Any]) -> str:
+    """Return the next Feishu setup command for an in-progress destination."""
+    feishu = config["feishu"]
+    if not config["setup"]["feishu_identity_confirmed"]:
+        if config["setup"]["feishu_authorization"].get("state") == "waiting":
+            return "open_verification_url_then_complete_feishu_auth"
+        return "run_feishu_auth_start"
+    destination = str(feishu.get("destination") or "")
+    target = _target_configured(feishu)
+    if destination == "existing" and not target:
+        return "configure_existing_feishu_target"
+    if destination == "create":
+        if feishu.get("manager_access") != "approved":
+            return "ask_feishu_manager_access"
+        if feishu.get("provisioning") != "created" or not target:
+            return "preview_feishu_base_creation"
+    if not target or not feishu.get("enabled"):
+        return "finish_feishu_setup_before_write"
+    return "authorize_and_run_feishu_check"
+
+
+def review_guidance(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Describe persisted Feishu state without blocking article reading."""
+    if config is None:
+        return {
+            "destination": "undecided",
+            "enabled": False,
+            "target_configured": False,
+            "identity": "user",
+            "identity_confirmed": False,
+            "authorization_state": "not_started",
+            "manager_access": "undecided",
+            "ready_to_write": False,
+            "document_url_configured": False,
+            "after_scoring": "ask_whether_to_configure_feishu",
+            "setup_next_action": "none",
+            "min_score": DEFAULT_CONFIG["settings"]["min_score"],
+            "content_dedup": DEFAULT_CONFIG["settings"]["content_dedup"],
+        }
+    feishu = config["feishu"]
+    destination = str(feishu.get("destination") or "undecided")
+    target = _target_configured(feishu)
+    identity_confirmed = bool(config["setup"]["feishu_identity_confirmed"])
+    ready = (
+        destination in {"existing", "create"}
+        and bool(feishu.get("enabled"))
+        and target
+        and identity_confirmed
+    )
+    if destination == "skip":
+        after_scoring = "complete_locally"
+        setup_next_action = "none"
+    elif ready:
+        after_scoring = "ask_write_confirmation"
+        setup_next_action = "none"
+    elif destination == "undecided":
+        after_scoring = "ask_whether_to_configure_feishu"
+        setup_next_action = "none"
+    else:
+        after_scoring = "finish_feishu_setup_before_write"
+        setup_next_action = _setup_next_action(config)
+    return {
+        "destination": destination,
+        "enabled": bool(feishu.get("enabled")),
+        "target_configured": target,
+        "identity": feishu.get("identity"),
+        "identity_confirmed": identity_confirmed,
+        "authorization_state": config["setup"]["feishu_authorization"].get("state"),
+        "manager_access": feishu.get("manager_access"),
+        "ready_to_write": ready,
+        "document_url_configured": bool(str(feishu.get("base_url") or "").strip()),
+        "after_scoring": after_scoring,
+        "setup_next_action": setup_next_action,
+        "min_score": config["settings"]["min_score"],
+        "content_dedup": config["settings"]["content_dedup"],
+    }
+
+
+def _review_policy(guidance: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fetch_before_setup": True,
+        "ask_before_fetch": False,
+        "after_scoring": guidance["after_scoring"],
+    }
 
 
 def _authorization(config: dict[str, Any]) -> dict[str, Any]:
@@ -149,41 +215,6 @@ def _reset_authorization(config: dict[str, Any], identity: str) -> None:
     }
 
 
-def _progress(
-    config: dict[str, Any] | None,
-    *,
-    next_action: str,
-) -> dict[str, Any]:
-    """Report only the optional Feishu setup remaining in link-review mode."""
-    configured_target = bool(
-        config
-        and config["feishu"]["enabled"]
-        and config["feishu"]["base_token"]
-        and config["feishu"]["table_id"]
-    )
-    steps = [
-        {
-            "id": "link_review",
-            "label": "评阅用户提供的文章链接",
-            "status": "complete",
-        },
-        {
-            "id": "feishu_target",
-            "label": "配置可选飞书写入目标",
-            "status": "complete" if configured_target else "optional",
-        },
-    ]
-    return {
-        "completed": 1 + int(configured_target),
-        "total": 1 + int(configured_target),
-        "percent": 100,
-        "current_step": "",
-        "steps": steps,
-        "next_action": next_action,
-        "next_action_label": ACTION_LABELS.get(next_action, next_action),
-    }
-
-
 def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
     """Diagnose only the public-link runtime and optional Feishu target."""
     report: dict[str, Any] = {
@@ -207,9 +238,12 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
         config = load_config()
     except ConfigError:
         config = None
-        report["config"] = {"exists": config_path().exists(), "valid": False}
+        exists = config_path().exists()
+        # A missing file uses defaults and can still review. A present file
+        # that fails validation must be repaired before its Feishu state is trusted.
+        report["config"] = {"exists": exists, "valid": not exists}
     else:
-        report["config"] = {"exists": True, **redacted_config(config)}
+        report["config"] = {"exists": True, "valid": True, **redacted_config(config)}
 
     summary = queue_summary()
     report["queue"] = {"total": summary["pending"] + summary["processed"], **summary}
@@ -221,21 +255,29 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
         except Exception as exc:
             update_health("feishu", success=False, failure_kind=getattr(exc, "kind", type(exc).__name__))
             report["online"] = {"feishu": failure(exc)["error"]}
-    report["progress"] = _progress(config, next_action="provide_article_link")
-    report["setup_stage"] = "link_review_ready"
+    guidance = review_guidance(config)
+    report["feishu"] = guidance
+    report["review"] = _review_policy(guidance)
+    report["setup_stage"] = guidance["after_scoring"]
+    if config is None and config_path().exists():
+        return report, "prepare_or_validate_local_config"
     return report, "provide_article_link"
 
 
 def _status() -> tuple[dict[str, Any], str]:
     report, next_action = _doctor(online=False)
+    guidance = report["feishu"]
     return {
         "mode": report["mode"],
+        "config_valid": bool(report.get("config", {}).get("valid")),
         "queue": report["queue"],
-        "progress": report["progress"],
-        "feishu_configured": bool(
-            isinstance(report.get("config"), dict)
-            and report["config"].get("feishu", {}).get("enabled")
-        ),
+        "feishu": guidance,
+        "review": report["review"],
+        "settings": {
+            "min_score": guidance["min_score"],
+            "content_dedup": guidance["content_dedup"],
+        },
+        "feishu_configured": bool(guidance.get("enabled")),
     }, next_action
 
 
@@ -1218,6 +1260,26 @@ def _feishu_disable(*, yes: bool) -> tuple[dict[str, Any], str]:
     return {"disabled": True, "base_data_deleted": False}, "none"
 
 
+def _settings(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    if arguments.settings_command == "show":
+        config = load_config() if config_path().exists() else validate_config(deepcopy(DEFAULT_CONFIG))
+        return {"settings": config["settings"]}, "none"
+    updates: dict[str, Any] = {}
+    if arguments.min_score is not None:
+        updates["min_score"] = arguments.min_score
+    if arguments.content_dedup is not None:
+        updates["content_dedup"] = arguments.content_dedup == "on"
+    if not updates:
+        raise ValueError("provide --min-score and/or --content-dedup")
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        config["settings"].update(updates)
+        return config
+
+    saved = modify_config(mutate)
+    return {"settings": saved["settings"], "updated_fields": sorted(updates)}, "none"
+
+
 def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     config = load_config()
     current = config["preferences"]
@@ -1260,7 +1322,7 @@ def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         return config
 
     saved = modify_config(mutate_update)
-    return {"preferences": saved["preferences"], "updated_fields": sorted(updates)}, "generate_digest_plan"
+    return {"preferences": saved["preferences"], "updated_fields": sorted(updates)}, "none"
 
 
 # The all-data wipe enumerates every child of the state directory. Refuse
@@ -1327,6 +1389,9 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     targets: list[Path] = []
     if scope in {"queue", "all-data"}:
         targets.extend([queue_path(), lock_path()])
+        cache_root = article_cache_dir()
+        if cache_root.exists():
+            targets.append(cache_root)
     if scope == "all-data":
         root = config_path().parent
         if _reset_root_is_dangerous(root.resolve()):
@@ -1388,7 +1453,7 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             return config
 
         modify_config(mutate_reset)
-        return {"cleared": "feishu", "preserved": ["settings", "preferences", "queue"]}, "ask_user_for_feishu_destination"
+        return {"cleared": "feishu", "preserved": ["settings", "preferences", "queue"]}, "provide_article_link"
     root = data_dir().resolve()
     for target in existing:
         if target.parent != root and target not in {
@@ -1401,6 +1466,8 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             shutil.rmtree(target)
         else:
             target.unlink()
+    if scope in {"queue", "all-data"}:
+        clear_article_cache()
     return {"deleted": [str(path) for path in existing], "recoverable": False}, "none"
 
 
@@ -1464,6 +1531,12 @@ def build_parser() -> argparse.ArgumentParser:
     auth_commands.add_parser("complete")
     expire = auth_commands.add_parser("expire")
     expire.add_argument("--yes", action="store_true")
+    settings = commands.add_parser("settings")
+    settings_commands = settings.add_subparsers(dest="settings_command", required=True)
+    settings_commands.add_parser("show")
+    set_settings = settings_commands.add_parser("set")
+    set_settings.add_argument("--min-score", type=float)
+    set_settings.add_argument("--content-dedup", choices=("on", "off"))
     preferences = commands.add_parser("preferences")
     preference_commands = preferences.add_subparsers(
         dest="preference_command", required=True
@@ -1526,6 +1599,8 @@ def main(argv: list[str] | None = None) -> int:
             data, next_action = _feishu_create_base(arguments)
         elif arguments.command == "feishu-auth":
             data, next_action = _feishu_auth(arguments)
+        elif arguments.command == "settings":
+            data, next_action = _settings(arguments)
         elif arguments.command == "preferences":
             data, next_action = _preferences(arguments)
         elif arguments.command == "feishu-disable":

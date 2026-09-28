@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from article_cache import delete_article_text
 from paths import lock_path, queue_path, secure_write_json
 from process_lock import process_lock
 from url_identity import canonicalize_wechat_article_url, normalize_article_url
@@ -378,6 +379,7 @@ def dismiss_article(link: str) -> dict[str, Any]:
                 isinstance(existing, dict)
                 and existing.get("metadata", {}).get("disposition") == "dismissed"
             ):
+                delete_article_text(link)
                 return deepcopy(existing)
             raise LookupError("only pending articles can be dismissed")
         data["pending"] = [
@@ -394,6 +396,7 @@ def dismiss_article(link: str) -> dict[str, Any]:
         }
         data["processed"][normalized] = entry
         _write_unlocked(data)
+        delete_article_text(link)
         return deepcopy(entry)
 
 
@@ -437,6 +440,7 @@ def complete_article(
                     raise LookupError(
                         "article was dismissed and cannot be completed; restore it first"
                     )
+                delete_article_text(link)
                 return deepcopy(existing)
             raise LookupError("article is no longer pending")
         data["pending"] = [
@@ -451,6 +455,7 @@ def complete_article(
         }
         data["processed"][normalized] = entry
         _write_unlocked(data)
+        delete_article_text(link)
         return deepcopy(entry)
 
 

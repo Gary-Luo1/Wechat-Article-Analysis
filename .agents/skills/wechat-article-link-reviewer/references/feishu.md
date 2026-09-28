@@ -1,7 +1,8 @@
 # Guided Feishu setup and sync
 
-Ask before article fetching whether this task needs Feishu writing and which
-exact Base/table to use. Ask management access only when creating a new Base.
+Do not ask about Feishu before the article has been read. After scoring, follow
+`review.after_scoring` from `manage status`. Ask management access only when
+creating a new Base.
 Configure a target only after those choices; never request WeChat credentials,
 Base tokens, App secrets, or manually supplied Open IDs in chat.
 
@@ -96,20 +97,22 @@ resolvable title and URL fields. Never create missing fields silently.
 Every write is explicit:
 
 ```text
-process done --link <WECHAT_URL> --dims-file <SCORES.json> --feishu
-process sync-feishu --link <WECHAT_URL>
+process --format json done --link <WECHAT_URL> --dims-file <SCORES.json> --feishu
+process --format json done --link <WECHAT_URL> --feishu
 process sync-feishu --all --dry-run
 ```
 
-The `--all` form is preview-only. Actual retries use `--link` one article at a
+`done --feishu --link` is the write command for a pending review and for an
+already processed review. `sync-feishu --link` calls that same path. The
+`--all` form is preview-only. Actual retries use `--link` one article at a
 time; a non-dry-run bulk request is rejected.
 
-Use `done --feishu` while the review is pending. Use `sync-feishu --link` when a
-processed review was previously kept local, skipped by the threshold, or left in
-the retry outbox. `--force-feishu` applies only to one explicitly confirmed
-article. Failed writes remain in the local outbox. URL-based upsert prevents
+`--force-feishu` applies only to one explicitly confirmed below-threshold
+article, or to an explicit rewrite of one already synced article. A failed
+write left at `sync_status=pending` can be retried with `done --feishu --link`
+without asking for `--force-feishu` again. URL-based upsert prevents
 duplicates; a retry does not mark an entry synced until the target confirms
-success.
+success. The JSON result carries `document_url` when the write succeeds.
 
 The runtime exposes only `process` and `manage`. Raw lark data commands and a
 standalone resource-grant command are intentionally unavailable; Base creation

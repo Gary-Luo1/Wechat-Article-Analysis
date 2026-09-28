@@ -30,10 +30,10 @@ pwsh -File .\install.ps1 -Target agents
 请审阅这篇文章：https://mp.weixin.qq.com/s/...
 ```
 
-Skill 会读取正文、完成五维评分并保存本地结果。飞书写入是可选能力，必须同时满足：
+Skill 会先读取正文并完成五维评分。飞书写入是可选能力，必须同时满足：
 
-1. 本任务已选定飞书目标
-2. 当前这篇文章得到明确确认
+1. 本任务已选定飞书目标。已保存的「跳过」不会反复追问；未配置时在评分之后再问。
+2. 当前这篇文章得到明确确认。用户在同一条消息里要求写入这篇时，不再追问「写入」。低于 `settings.min_score`（默认 6.0）仍要单独确认。
 
 Cursor 等独立环境只能用飞书**用户身份**。Bot 写入仅限受支持的飞书宿主（`openclaw`、`hermes`、`lark-channel`），且只能写已有表格。新建 Base 始终使用用户身份，不会做 Bot 管理员授权。成功创建或写入后，应回报可打开的表格链接（`document_url`），不要输出表格 token。
 
@@ -43,6 +43,8 @@ Cursor 等独立环境只能用飞书**用户身份**。Bot 写入仅限受支�
 - [飞书配置](.agents/skills/wechat-article-link-reviewer/references/feishu.md)
 - [安装与运行环境](.agents/skills/wechat-article-link-reviewer/references/setup.md)
 - [队列与运维](.agents/skills/wechat-article-link-reviewer/references/operations.md)
+
+评分后的确认规则以 `manage status` 的 `review.after_scoring` 为准。完成审阅统一用 `process done --link`；`--format json` 的结果里看 `feishu_written` 和 `document_url`。阈值和正文去重用 `manage settings`。
 
 ## 检查环境
 

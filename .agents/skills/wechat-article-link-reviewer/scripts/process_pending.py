@@ -5,12 +5,19 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
+from article_cache import (
+    delete_article_text,
+    inline_article_text,
+    load_article_text,
+    store_article_text,
+)
 from article_inbox import plan_digest, query_inbox
 from bitable_client import (
     LarkCLIError,
@@ -43,7 +50,7 @@ from scoring_rubric import (
     is_advertisement,
     should_sync,
 )
-from url_identity import canonicalize_wechat_article_url
+from url_identity import canonicalize_wechat_article_url, normalize_article_url
 
 
 logger = logging.getLogger("wechat-process")
@@ -71,6 +78,16 @@ class ArticleReadRequiredError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("read the article successfully before scoring or completing it")
+
+
+class ArticleCacheMissingError(ValueError):
+    """The ephemeral body is gone, so the article must be evaluated again."""
+
+    code = "ARTICLE_CACHE_MISSING"
+    retryable = False
+
+    def __init__(self) -> None:
+        super().__init__("cached article text is unavailable; run evaluate before scoring")
 
 
 class BatchRiskControlError(ValueError):
@@ -322,23 +339,112 @@ def cmd_batch_read(limit: int) -> int:
     return 0
 
 
+def _after_scoring_action() -> str:
+    """Return the post-review step implied by the saved Feishu destination."""
+    try:
+        config = load_config()
+    except ConfigError:
+        return "ask_whether_to_configure_feishu"
+    feishu = config["feishu"]
+    destination = str(feishu.get("destination") or "undecided")
+    if destination == "skip":
+        return "complete_locally"
+    target = bool(str(feishu.get("base_token") or "").strip()) and bool(
+        str(feishu.get("table_id") or "").strip()
+    )
+    ready = (
+        destination in {"existing", "create"}
+        and bool(feishu.get("enabled"))
+        and target
+        and bool(config["setup"]["feishu_identity_confirmed"])
+    )
+    if ready:
+        return "ask_write_confirmation"
+    if destination == "undecided":
+        return "ask_whether_to_configure_feishu"
+    return "finish_feishu_setup_before_write"
+
+
+def _processed_next_action(sync_status: str) -> str:
+    if sync_status == "synced":
+        return "none"
+    if sync_status == "pending":
+        return "retry_feishu_sync"
+    if sync_status == "skipped_low_score":
+        return "confirm_below_threshold_write"
+    after = _after_scoring_action()
+    if after == "complete_locally":
+        return "none"
+    return after
+
+
+def _pending_article(url: str) -> dict[str, Any] | None:
+    normalized = normalize_article_url(url)
+    for article in get_pending():
+        if article.get("normalized_url") == normalized:
+            return article
+    return None
+
+
+def _reusable_cached_text(url: str) -> str | None:
+    article = _pending_article(url)
+    cached = load_article_text(url)
+    if article is None or cached is None or not has_verified_read(article):
+        return None
+    fingerprint = hashlib.sha256(cached.encode("utf-8")).hexdigest()
+    if article["read_state"]["content_sha256"] != fingerprint:
+        return None
+    return cached
+
+
+def _review_content(text: str, *, title: str, from_cache: bool) -> dict[str, Any]:
+    inline, truncated = inline_article_text(text)
+    advertisement = is_advertisement(title, text)
+    if advertisement:
+        next_action = "confirm_advertisement"
+    elif truncated:
+        next_action = "read_cached_article_before_scoring"
+    else:
+        next_action = "score_and_complete_by_url"
+    return {
+        "untrusted_article_content": inline,
+        "content_chars": len(text),
+        "content_truncated": truncated,
+        "content_from_cache": from_cache,
+        "ad_heuristic": advertisement,
+        "next_action": next_action,
+    }
+
+
+def _print_json(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 def cmd_evaluate(arguments: argparse.Namespace) -> int:
     """Fetch one supplied article once and prepare it for Agent scoring."""
     url = canonicalize_wechat_article_url(arguments.url)
     processed = get_processed_entry(url)
     if processed is not None:
-        print(
-            json.dumps(
-                {
-                    "status": "already_processed",
-                    "article": processed["article"],
-                    "metadata": processed["metadata"],
-                    "sync_status": processed["sync_status"],
-                    "next_action": "none",
-                },
-                ensure_ascii=False,
-            )
+        delete_article_text(url)
+        _print_json(
+            {
+                "status": "already_processed",
+                "article": processed["article"],
+                "metadata": processed["metadata"],
+                "sync_status": processed["sync_status"],
+                "next_action": _processed_next_action(str(processed.get("sync_status") or "")),
+            }
         )
+        return 0
+    cached = _reusable_cached_text(url)
+    if cached is not None:
+        article = _pending_article(url) or {"title": "", "link": url}
+        result = {
+            "status": "already_pending",
+            "article": article,
+            **_review_content(cached, title=str(article.get("title", "")), from_cache=True),
+        }
+        _print_json(result)
         return 0
     document = fetch_article(url)
     text = str(document.get("text", ""))
@@ -354,20 +460,23 @@ def cmd_evaluate(arguments: argparse.Namespace) -> int:
         content_dedup = bool(load_config()["settings"]["content_dedup"])
     except ConfigError:
         content_dedup = bool(DEFAULT_CONFIG["settings"]["content_dedup"])
+    store_article_text(article["link"], text)
     status, saved = add_pending_with_verified_read(
         article,
         text,
         content_dedup=content_dedup,
     )
     if status == "already_processed":
+        delete_article_text(article["link"])
         result = {
             "status": status,
             "article": saved.get("article", article),
             "metadata": saved.get("metadata", {}),
             "sync_status": saved.get("sync_status", ""),
-            "next_action": "none",
+            "next_action": _processed_next_action(str(saved.get("sync_status") or "")),
         }
     elif status == "duplicate_content":
+        delete_article_text(article["link"])
         result = {
             "status": status,
             "article": article,
@@ -377,11 +486,34 @@ def cmd_evaluate(arguments: argparse.Namespace) -> int:
         result = {
             "status": status,
             "article": saved,
-            "untrusted_article_content": text,
-            "ad_heuristic": is_advertisement(article["title"], text),
-            "next_action": "score_and_complete_by_url",
+            **_review_content(text, title=article["title"], from_cache=False),
         }
-    print(json.dumps(result, ensure_ascii=False))
+    _print_json(result)
+    return 0
+
+
+def cmd_content(arguments: argparse.Namespace) -> int:
+    """Return the cached full text for one pending article without fetching."""
+    url = canonicalize_wechat_article_url(arguments.link)
+    article = _pending_article(url)
+    cached = load_article_text(url)
+    if article is None or cached is None or not has_verified_read(article):
+        raise ArticleCacheMissingError()
+    fingerprint = hashlib.sha256(cached.encode("utf-8")).hexdigest()
+    if article["read_state"]["content_sha256"] != fingerprint:
+        delete_article_text(url)
+        raise ArticleCacheMissingError()
+    title = str(article.get("title", ""))
+    payload = _review_content(cached, title=title, from_cache=True)
+    payload["untrusted_article_content"] = cached
+    payload["content_truncated"] = False
+    payload["status"] = "cached"
+    payload["article"] = article
+    if payload["ad_heuristic"]:
+        payload["next_action"] = "confirm_advertisement"
+    else:
+        payload["next_action"] = "score_and_complete_by_url"
+    _print_json(payload)
     return 0
 
 
@@ -459,32 +591,166 @@ def _raise_sync_failures(failures: list[Exception], *, prefix: str) -> None:
     raise ValueError(message) from primary
 
 
+def _review_payload(
+    *,
+    status: str,
+    link: str,
+    title: str,
+    score: float | None,
+    sync_status: str,
+    feishu_written: bool,
+    next_action: str,
+    message: str,
+    below_threshold: bool = False,
+    document_url: str = "",
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "link": link,
+        "title": title,
+        "score": score,
+        "sync_status": sync_status,
+        "feishu_written": feishu_written,
+        "document_url": document_url,
+        "below_threshold": below_threshold,
+        "message": message,
+        "next_action": next_action,
+    }
+
+
+def _emit_review(payload: dict[str, Any]) -> int:
+    _print_json(payload)
+    return 0
+
+
+def _sync_processed(
+    entry: dict[str, Any], *, dry_run: bool = False, force_feishu: bool = False
+) -> int:
+    """Write one already processed article, or report why it was not written."""
+    metadata = entry.get("metadata", {})
+    article = entry.get("article", {})
+    link = str(article.get("link", ""))
+    title = str(article.get("title", ""))
+    if metadata.get("disposition") == "dismissed" or metadata.get("ad"):
+        raise ValueError("dismissed or advertisement articles cannot be synced to Feishu")
+    sync_status = str(entry.get("sync_status") or "")
+    if sync_status == "synced" and not force_feishu:
+        return _emit_review(
+            _review_payload(
+                status="already_synced",
+                link=link,
+                title=title,
+                score=metadata.get("score") if isinstance(metadata.get("score"), (int, float)) else None,
+                sync_status="synced",
+                feishu_written=True,
+                document_url=_feishu_document_url(),
+                next_action="none",
+                message=f"Already synced: {title}",
+            )
+        )
+    score = metadata.get("score")
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        raise ValueError("processed article has no valid score to sync")
+    try:
+        config = load_config()
+    except ConfigError:
+        config = None
+    minimum = (
+        config["settings"]["min_score"]
+        if config is not None
+        else DEFAULT_CONFIG["settings"]["min_score"]
+    )
+    below = not should_sync(float(score), minimum)
+    if below and not force_feishu and sync_status != "pending":
+        return _emit_review(
+            _review_payload(
+                status="below_threshold",
+                link=link,
+                title=title,
+                score=float(score),
+                sync_status=sync_status,
+                feishu_written=False,
+                below_threshold=True,
+                next_action="confirm_below_threshold_write",
+                message=(
+                    f"Score {score} is below the configured Feishu threshold; "
+                    "confirm this article before --force-feishu"
+                ),
+            )
+        )
+    if config is None:
+        raise ConfigError("Feishu sync requires configuration")
+    try:
+        _sync_entry(entry, dry_run=dry_run)
+    except (ConfigError, LarkCLIError, ValueError) as exc:
+        if not dry_run:
+            update_sync_status(link, "pending", str(exc))
+        _raise_sync_failures(
+            [exc],
+            prefix="processed article remains local because Feishu sync failed",
+        )
+    document_url = "" if dry_run else _feishu_document_url()
+    action = "dry_run" if dry_run else "synced"
+    message = f"{'Dry run succeeded' if dry_run else 'Synced'}: {title}"
+    return _emit_review(
+        _review_payload(
+            status=action,
+            link=link,
+            title=title,
+            score=float(score),
+            sync_status="pending" if dry_run else "synced",
+            feishu_written=not dry_run,
+            document_url=document_url,
+            next_action="none",
+            message=message,
+        )
+    )
+
+
 def _done_already_processed(
     processed: dict[str, Any], arguments: argparse.Namespace
 ) -> int:
-    """Report an already-completed article idempotently."""
+    """Report a saved review, or write it when this call passes --feishu."""
     metadata = processed.get("metadata", {})
     if metadata.get("disposition") == "dismissed":
         raise LookupError(
             "article was dismissed and cannot be completed; restore it first"
         )
     if arguments.feishu:
-        raise LookupError(
-            "article is already processed; write it with sync-feishu --link"
+        return _sync_processed(
+            processed,
+            dry_run=bool(arguments.dry_run),
+            force_feishu=bool(arguments.force_feishu),
         )
-    title = processed["article"].get("title", "")
+    article = processed.get("article", {})
+    title = str(article.get("title", ""))
     score = metadata.get("score")
+    numeric_score = float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else None
+    sync_status = str(processed.get("sync_status") or "")
     if metadata.get("ad"):
-        print(f"Skipped advertisement: {title}")
-    elif isinstance(score, (int, float)):
-        print(f"Completed: {title} (score {score})")
+        message = f"Skipped advertisement: {title}"
+        status = "skipped_ad"
+    elif numeric_score is not None:
+        message = f"Completed: {title} (score {numeric_score})"
+        status = "already_processed"
     else:
-        print(f"Already processed: {title}")
-    if processed.get("sync_status") == "synced":
-        document_url = _feishu_document_url()
-        if document_url:
-            print(f"Feishu: {document_url}")
-    return 0
+        message = f"Already processed: {title}"
+        status = "already_processed"
+    document_url = _feishu_document_url() if sync_status == "synced" else ""
+    return _emit_review(
+        _review_payload(
+            status=status,
+            link=str(article.get("link", "")),
+            title=title,
+            score=numeric_score,
+            sync_status=sync_status,
+            feishu_written=sync_status == "synced",
+            document_url=document_url,
+            below_threshold=sync_status == "skipped_low_score",
+            next_action=_processed_next_action(sync_status),
+            message=message,
+        )
+    )
 
 
 def cmd_done(arguments: argparse.Namespace) -> int:
@@ -503,37 +769,61 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         if processed is None:
             raise
         return _done_already_processed(processed, arguments)
+    title = str(article.get("title", ""))
+    link = str(article.get("link", ""))
     if arguments.ad:
         if arguments.dry_run and not arguments.feishu:
             raise ValueError("--dry-run is only valid together with --feishu")
         if arguments.dry_run:
-            print(f"Dry run: advertisement remains pending: {article.get('title', '')}")
-            return 0
+            return _emit_review(
+                _review_payload(
+                    status="dry_run",
+                    link=link,
+                    title=title,
+                    score=None,
+                    sync_status="pending",
+                    feishu_written=False,
+                    next_action="none",
+                    message=f"Dry run: advertisement remains pending: {title}",
+                )
+            )
         complete_article(
-            article["link"],
+            link,
             {"ad": True, "reason": "advertisement/promotion"},
             sync_status="skipped_ad",
         )
-        print(f"Skipped advertisement: {article.get('title', '')}")
-        return 0
+        return _emit_review(
+            _review_payload(
+                status="skipped_ad",
+                link=link,
+                title=title,
+                score=None,
+                sync_status="skipped_ad",
+                feishu_written=False,
+                next_action="none",
+                message=f"Skipped advertisement: {title}",
+            )
+        )
     if not has_verified_read(article):
         raise ArticleReadRequiredError()
     try:
         config = load_config()
     except ConfigError:
-        if arguments.feishu:
-            raise
         config = None
     if arguments.dry_run and not arguments.feishu:
         raise ValueError("--dry-run is only valid together with --feishu")
     metadata = _score_metadata(arguments)
+    score = float(metadata["score"])
     sync_requested = bool(arguments.feishu)
     if sync_requested:
-        if config is None:
-            raise ConfigError("Feishu sync requires configuration")
-        if arguments.force_feishu or should_sync(
-            metadata["score"], config["settings"]["min_score"]
-        ):
+        minimum = (
+            config["settings"]["min_score"]
+            if config is not None
+            else DEFAULT_CONFIG["settings"]["min_score"]
+        )
+        if arguments.force_feishu or should_sync(score, minimum):
+            if config is None:
+                raise ConfigError("Feishu sync requires configuration")
             status = "pending"
         else:
             status = "skipped_low_score"
@@ -541,51 +831,130 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         status = "not_requested"
     if arguments.dry_run:
         if status != "pending":
-            print(
-                f"Dry run: score {metadata['score']} is below the configured Feishu threshold"
+            return _emit_review(
+                _review_payload(
+                    status="below_threshold",
+                    link=link,
+                    title=title,
+                    score=score,
+                    sync_status="pending",
+                    feishu_written=False,
+                    below_threshold=True,
+                    next_action="confirm_below_threshold_write",
+                    message=(
+                        f"Dry run: score {score} is below the configured Feishu threshold"
+                    ),
+                )
             )
-            return 0
         _sync_entry({"article": article, "metadata": metadata}, dry_run=True)
-        print(f"Dry run succeeded; article remains pending: {article.get('title', '')}")
-        return 0
-    entry = complete_article(article["link"], metadata, sync_status=status)
+        return _emit_review(
+            _review_payload(
+                status="dry_run",
+                link=link,
+                title=title,
+                score=score,
+                sync_status="pending",
+                feishu_written=False,
+                next_action="none",
+                message=f"Dry run succeeded; article remains pending: {title}",
+            )
+        )
+    entry = complete_article(link, metadata, sync_status=status)
+    if status == "skipped_low_score":
+        return _emit_review(
+            _review_payload(
+                status="below_threshold",
+                link=link,
+                title=title,
+                score=score,
+                sync_status="skipped_low_score",
+                feishu_written=False,
+                below_threshold=True,
+                next_action="confirm_below_threshold_write",
+                message=(
+                    f"Completed: {title} (score {score}). "
+                    "Not written because it is below the Feishu threshold"
+                ),
+            )
+        )
     if status == "pending":
         try:
-            _sync_entry(entry, dry_run=arguments.dry_run)
+            _sync_entry(entry, dry_run=False)
         except (ConfigError, LarkCLIError, ValueError) as exc:
-            if not arguments.dry_run:
-                update_sync_status(article["link"], "pending", str(exc))
+            update_sync_status(link, "pending", str(exc))
             _raise_sync_failures(
                 [exc],
                 prefix="article was saved locally but Feishu sync failed",
             )
-    print(f"Completed: {article.get('title', '')} (score {metadata['score']})")
-    if status == "pending":
-        document_url = _feishu_document_url()
-        if document_url:
-            print(f"Feishu: {document_url}")
-    return 0
+        return _emit_review(
+            _review_payload(
+                status="synced",
+                link=link,
+                title=title,
+                score=score,
+                sync_status="synced",
+                feishu_written=True,
+                document_url=_feishu_document_url(),
+                next_action="none",
+                message=f"Completed: {title} (score {score})",
+            )
+        )
+    return _emit_review(
+        _review_payload(
+            status="completed",
+            link=link,
+            title=title,
+            score=score,
+            sync_status="not_requested",
+            feishu_written=False,
+            next_action="none",
+            message=f"Completed: {title} (score {score})",
+        )
+    )
 
 
 def cmd_sync_all(*, dry_run: bool = False) -> int:
     if not dry_run:
         raise ValueError(
             "bulk Feishu sync is preview-only; retry each explicitly confirmed "
-            "article with sync-feishu --link"
+            "article with done --feishu --link"
         )
     entries = pending_sync_entries()
     if not entries:
-        print("No articles are waiting for Feishu sync")
-        return 0
+        return _emit_review(
+            _review_payload(
+                status="dry_run",
+                link="",
+                title="",
+                score=None,
+                sync_status="",
+                feishu_written=False,
+                next_action="none",
+                message="No articles are waiting for Feishu sync",
+            )
+        )
     failures: list[Exception] = []
+    results: list[dict[str, str]] = []
     for entry in entries:
+        title = str(entry["article"].get("title", ""))
         try:
             _sync_entry(entry, dry_run=True)
-            print(f"Synced: {entry['article'].get('title', '')}")
+            results.append({"title": title, "status": "ready"})
         except (ConfigError, LarkCLIError, ValueError) as exc:
             failures.append(exc)
-            print(f"Sync failed: {entry['article'].get('title', '')}: {exc}")
-    _raise_sync_failures(failures, prefix="one or more Feishu sync operations failed")
+            results.append({"title": title, "status": "failed"})
+    if failures:
+        _raise_sync_failures(failures, prefix="one or more Feishu sync operations failed")
+    _print_json(
+        {
+            "status": "dry_run",
+            "count": len(results),
+            "results": results,
+            "feishu_written": False,
+            "next_action": "none",
+            "message": f"Dry run checked {len(results)} article(s)",
+        }
+    )
     return 0
 
 
@@ -593,37 +962,7 @@ def cmd_sync_one(link: str, *, dry_run: bool = False, force_feishu: bool = False
     entry = get_processed_entry(link)
     if entry is None:
         raise LookupError("no processed article matches that URL")
-    metadata = entry.get("metadata", {})
-    if metadata.get("disposition") == "dismissed" or metadata.get("ad"):
-        raise ValueError("dismissed or advertisement articles cannot be synced to Feishu")
-    if entry.get("sync_status") == "synced" and not force_feishu:
-        print(f"Already synced: {entry['article'].get('title', '')}")
-        return 0
-    score = metadata.get("score")
-    if not isinstance(score, (int, float)):
-        raise ValueError("processed article has no valid score to sync")
-    config = load_config()
-    if not force_feishu and not should_sync(float(score), config["settings"]["min_score"]):
-        raise ValueError(
-            "article score is below the configured Feishu threshold; "
-            "use --force-feishu only after explicit per-article confirmation"
-        )
-    try:
-        _sync_entry(entry, dry_run=dry_run)
-    except (ConfigError, LarkCLIError, ValueError) as exc:
-        if not dry_run:
-            update_sync_status(entry["article"]["link"], "pending", str(exc))
-        _raise_sync_failures(
-            [exc],
-            prefix="processed article remains local because Feishu sync failed",
-        )
-    action = "Dry run succeeded" if dry_run else "Synced"
-    print(f"{action}: {entry['article'].get('title', '')}")
-    if not dry_run:
-        document_url = _feishu_document_url()
-        if document_url:
-            print(f"Feishu: {document_url}")
-    return 0
+    return _sync_processed(entry, dry_run=dry_run, force_feishu=force_feishu)
 
 
 def cmd_feishu_check(*, save_mapping: bool = False) -> int:
@@ -722,6 +1061,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_selector(read_parser)
     batch_parser = commands.add_parser("batch-read")
     batch_parser.add_argument("--limit", type=int, default=10)
+    content_parser = commands.add_parser("content")
+    content_parser.add_argument("--link", required=True)
     evaluate_parser = commands.add_parser("evaluate")
     evaluate_parser.add_argument(
         "--url",
@@ -794,6 +1135,8 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         if arguments.limit < 1 or arguments.limit > 100:
             raise ValueError("--limit must be between 1 and 100")
         return cmd_batch_read(arguments.limit)
+    if arguments.command == "content":
+        return cmd_content(arguments)
     if arguments.command == "evaluate":
         return cmd_evaluate(arguments)
     if arguments.command == "done":
@@ -844,6 +1187,9 @@ def main(argv: list[str] | None = None) -> int:
             command_data: Any = {"command": arguments.command, "output": lines}
             if arguments.command in {
                 "evaluate",
+                "content",
+                "done",
+                "sync-feishu",
                 "inbox",
                 "inbox-mark",
                 "dismiss",
@@ -856,26 +1202,11 @@ def main(argv: list[str] | None = None) -> int:
                     command_data = json.loads(lines[0])
                 except json.JSONDecodeError:
                     pass
-            if arguments.command in {"done", "sync-feishu"} and isinstance(
-                command_data, dict
-            ):
-                document_url = next(
-                    (
-                        line.removeprefix("Feishu: ").strip()
-                        for line in lines
-                        if line.startswith("Feishu: ")
-                    ),
-                    "",
-                )
-                if document_url:
-                    command_data["document_url"] = document_url
             next_action = "none" if result == 0 else "inspect_failed_items"
-            if (
-                arguments.command == "digest-plan"
-                and isinstance(command_data, dict)
-                and command_data.get("candidates")
+            if isinstance(command_data, dict) and isinstance(
+                command_data.get("next_action"), str
             ):
-                next_action = "read_score_digest_candidates"
+                next_action = str(command_data["next_action"])
             envelope = success(
                 command_data,
                 next_action=next_action,

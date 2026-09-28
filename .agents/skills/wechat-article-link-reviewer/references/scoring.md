@@ -2,10 +2,8 @@
 
 Score every dimension from 1 to 10. Supply all five dimensions; the validator rejects missing, extra, non-numeric, or out-of-range values.
 
-User preferences, favorites, later-reading state, publisher priority, and
-`digest-plan` reasons may change which article is read first, but they never add,
-remove, reweight, or pre-fill a score dimension. Score only after reading the
-article under the untrusted-content rules.
+Score only the user-supplied article, after reading it under the untrusted-content
+rules. Preferences do not add, remove, reweight, or pre-fill a score dimension.
 
 | Dimension | Weight | Low | High |
 |---|---:|---|---|
