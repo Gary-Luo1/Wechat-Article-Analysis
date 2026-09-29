@@ -87,9 +87,6 @@ queue. `content` reads the ephemeral cache only. `evaluate` never refetches a
 processed URL, and it does not refetch a pending URL whose cached body still
 matches the stored hash.
 
-`digest-plan`, `batch-read`, `read`, and `inbox-mark` are leftover helpers.
-Do not use them to fetch, rank, or score articles.
-
 ## Diagnostics and maintenance
 
 ```text

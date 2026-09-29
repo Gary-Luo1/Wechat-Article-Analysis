@@ -1,12 +1,11 @@
-"""Article inbox queries and digest planning over the local queue."""
+"""Article inbox queries over the local queue."""
 
 from __future__ import annotations
 
 from datetime import datetime
-import time
 from typing import Any
 
-from queue_helpers import get_pending, read_queue
+from queue_helpers import read_queue
 
 
 def _timestamp(item: dict[str, Any]) -> float:
@@ -192,84 +191,3 @@ def query_inbox(
     }
 
 
-def plan_digest(
-    preferences: dict[str, Any],
-    *,
-    hours: int | float,
-    limit: int,
-    include_later: bool = False,
-) -> dict[str, Any]:
-    """Select pending Article inbox entries without reading or completing them."""
-    if not 1 <= hours <= 8760:
-        raise ValueError("hours must be between 1 and 8760")
-    if not 1 <= limit <= 50:
-        raise ValueError("limit must be between 1 and 50")
-    cutoff = time.time() - hours * 3600
-    include_topics = [str(value).casefold() for value in preferences["include_topics"]]
-    exclude_keywords = [
-        str(value).casefold() for value in preferences["exclude_keywords"]
-    ]
-    preferred_accounts = {
-        str(value).casefold() for value in preferences["preferred_accounts"]
-    }
-    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    excluded = {"too_old": 0, "later": 0, "keyword": 0}
-    for article in get_pending():
-        state = str(article.get("inbox_state", "active"))
-        if state == "later" and not include_later:
-            excluded["later"] += 1
-            continue
-        timestamp = _timestamp(
-            {"article": article, "discovered_at": article.get("discovered_at", "")}
-        )
-        if timestamp and timestamp < cutoff:
-            excluded["too_old"] += 1
-            continue
-        searchable = " ".join(
-            str(article.get(key, "")) for key in ("title", "digest", "account")
-        ).casefold()
-        if any(keyword in searchable for keyword in exclude_keywords):
-            excluded["keyword"] += 1
-            continue
-        topic_matches = [topic for topic in include_topics if topic in searchable]
-        account = str(article.get("account", "")).strip()
-        preferred_account = account.casefold() in preferred_accounts
-        favorite = bool(article.get("favorite", False))
-        reasons = []
-        if favorite:
-            reasons.append("favorite")
-        if preferred_account:
-            reasons.append("preferred_account")
-        if topic_matches:
-            reasons.append("topic_match")
-        candidates.append(
-            (
-                (favorite, preferred_account, len(topic_matches), timestamp),
-                {
-                    "title": str(article.get("title", "")),
-                    "account": account,
-                    "link": str(article.get("link", "")),
-                    "url": str(article.get("link", "")),
-                    "published_at": article.get("update_time", 0),
-                    "favorite": favorite,
-                    "inbox_state": state,
-                    "matched_topics": topic_matches,
-                    "selection_reasons": reasons or ["recent"],
-                },
-            )
-        )
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    selected = [item for _, item in candidates[:limit]]
-    return {
-        "window_hours": hours,
-        "limit": limit,
-        "include_later": bool(include_later),
-        "preferences": preferences,
-        "eligible": len(candidates),
-        "returned": len(selected),
-        "excluded": excluded,
-        "candidates": selected,
-        "content_fetched": False,
-        "articles_completed": False,
-        "feishu_written": False,
-    }

@@ -18,7 +18,7 @@ from article_cache import (
     load_article_text,
     store_article_text,
 )
-from article_inbox import plan_digest, query_inbox
+from article_inbox import query_inbox
 from bitable_client import (
     LarkCLIError,
     feishu_document_url,
@@ -26,7 +26,6 @@ from bitable_client import (
 )
 from config_store import DEFAULT_CONFIG, ConfigError, load_config, modify_config, update_health
 from feishu_target import production_feishu_target
-from http_client import RequestPacer, new_session
 from protocol import dump, failure, success
 from queue_helpers import (
     cleanup_processed,
@@ -38,10 +37,8 @@ from queue_helpers import (
     add_pending_with_verified_read,
     pending_sync_entries,
     has_verified_read,
-    record_verified_read,
     resolve_pending,
     restore_dismissed,
-    update_inbox_item,
     update_sync_status,
 )
 from scoring_rubric import (
@@ -55,7 +52,6 @@ from url_identity import canonicalize_wechat_article_url, normalize_article_url
 
 
 logger = logging.getLogger("wechat-process")
-MAX_BATCH_CONTENT_CHARS = 200_000
 
 
 def fetch_article(url: str, **kwargs: Any) -> dict[str, Any]:
@@ -91,21 +87,6 @@ class ArticleCacheMissingError(ValueError):
         super().__init__("cached article text is unavailable; run evaluate before scoring")
 
 
-class BatchRiskControlError(ValueError):
-    """Expose a safe, structured stop point for automated batch readers."""
-
-    code = "ARTICLE_RISK_CONTROL"
-    retryable = False
-    next_action = "wait_before_retry"
-
-    def __init__(self, article: dict[str, Any], successful: int) -> None:
-        super().__init__(f"WeChat risk control stopped the batch after {successful} successful article(s)")
-        self.details = {
-            "blocked_url": str(article.get("link", "")),
-            "successful": successful,
-        }
-
-
 def _first_non_retryable(failures: list[Exception]) -> Exception:
     """Prefer the first non-retryable failure so automation keeps its code."""
     return next(
@@ -116,29 +97,6 @@ def _first_non_retryable(failures: list[Exception]) -> Exception:
 
 def _all_retryable(failures: list[Exception]) -> bool:
     return all(bool(getattr(item, "retryable", False)) for item in failures)
-
-
-class BatchReadError(ValueError):
-    """Summarize batch item failures without losing their retry semantics."""
-
-    def __init__(self, failures: list[Exception], successful: int) -> None:
-        primary = _first_non_retryable(failures)
-        self.code = str(getattr(primary, "code", "ARTICLE_FETCH_FAILED"))
-        self.retryable = _all_retryable(failures)
-        self.next_action = str(getattr(primary, "next_action", "inspect_failed_items"))
-        failure_codes = [
-            str(getattr(failure, "code", "ARTICLE_FETCH_FAILED"))
-            for failure in failures
-        ]
-        self.details = {
-            "successful": successful,
-            "failed": len(failures),
-            "failure_codes": failure_codes,
-        }
-        super().__init__(
-            f"batch read completed with {len(failures)} failed article(s); "
-            f"{successful} succeeded"
-        )
 
 
 def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -197,18 +155,6 @@ def cmd_inbox(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_inbox_mark(arguments: argparse.Namespace) -> int:
-    favorite: bool | None = None
-    if arguments.favorite:
-        favorite = True
-    elif arguments.unfavorite:
-        favorite = False
-    state = "later" if arguments.later else ("active" if arguments.active else None)
-    result = update_inbox_item(arguments.link, favorite=favorite, state=state)
-    print(json.dumps(result, ensure_ascii=False))
-    return 0
-
-
 def cmd_dismiss(arguments: argparse.Namespace) -> int:
     entry = dismiss_article(arguments.link)
     print(
@@ -228,115 +174,6 @@ def cmd_dismiss(arguments: argparse.Namespace) -> int:
 def cmd_restore(arguments: argparse.Namespace) -> int:
     article = restore_dismissed(arguments.link)
     print(json.dumps({"status": "pending", "article": article}, ensure_ascii=False))
-    return 0
-
-
-def _digest_plan(arguments: argparse.Namespace) -> dict[str, Any]:
-    try:
-        preferences = load_config()["preferences"]
-    except ConfigError:
-        preferences = dict(DEFAULT_CONFIG["preferences"])
-    hours = arguments.hours if arguments.hours is not None else preferences["digest_hours"]
-    limit = arguments.limit if arguments.limit is not None else preferences["digest_limit"]
-    return plan_digest(
-        preferences,
-        hours=hours,
-        limit=limit,
-        include_later=arguments.include_later,
-    )
-
-
-def cmd_digest_plan(arguments: argparse.Namespace) -> int:
-    result = _digest_plan(arguments)
-    if arguments.format == "json":
-        print(json.dumps(result, ensure_ascii=False))
-        return 0
-    print(
-        f"Digest candidates: {result['returned']} of {result['eligible']} eligible "
-        f"within {result['window_hours']} hours"
-    )
-    for index, item in enumerate(result["candidates"], start=1):
-        print(f"{index}. {item['title']} — {item['account']}")
-        print(f"   {item['url']}")
-    return 0
-
-
-def _configured_request_delay() -> float:
-    try:
-        return float(load_config()["settings"]["request_delay"])
-    except ConfigError:
-        return float(DEFAULT_CONFIG["settings"]["request_delay"])
-
-
-def _print_article(
-    article: dict[str, Any],
-    *,
-    session: Any | None = None,
-    pacer: RequestPacer | None = None,
-    max_output_chars: int | None = None,
-) -> tuple[str, bool]:
-    print(f"Title: {article.get('title', '')}")
-    print(f"Account: {article.get('account', '')}")
-    print(f"URL: {article.get('link', '')}")
-    print(f"Digest: {article.get('digest', '')}")
-    print("\n--- BEGIN UNTRUSTED ARTICLE CONTENT ---")
-    document = fetch_article(str(article["link"]), session=session, pacer=pacer)
-    text = str(document["text"])
-    record_verified_read(str(article["link"]), text)
-    displayed = text if max_output_chars is None else text[:max(0, max_output_chars)]
-    print(displayed)
-    if len(displayed) < len(text):
-        print(f"[Content output truncated: {len(text) - len(displayed)} character(s) omitted]")
-    print("--- END UNTRUSTED ARTICLE CONTENT ---")
-    suspected = is_advertisement(str(article.get("title", "")), text or "")
-    print(f"Ad heuristic: {'suspected' if suspected else 'not detected'}")
-    return text, suspected
-
-
-def cmd_read(arguments: argparse.Namespace) -> int:
-    _print_article(
-        _resolve(arguments),
-        pacer=RequestPacer(_configured_request_delay()),
-    )
-    return 0
-
-
-def cmd_batch_read(limit: int) -> int:
-    from article_reader import ArticleFetchError, WeChatRiskControlError
-
-    pending = get_pending()
-    if not pending:
-        print("No pending articles")
-        return 0
-    requested = min(limit, len(pending))
-    successful = 0
-    failures: list[Exception] = []
-    remaining_output = MAX_BATCH_CONTENT_CHARS
-    session = new_session()
-    pacer = RequestPacer(_configured_request_delay())
-    try:
-        for index, article in enumerate(pending[:limit], start=1):
-            print(f"\n===== ARTICLE {index}/{requested} =====")
-            try:
-                text, _ = _print_article(
-                    article,
-                    session=session,
-                    pacer=pacer,
-                    max_output_chars=remaining_output,
-                )
-                remaining_output = max(0, remaining_output - len(text))
-                successful += 1
-            except WeChatRiskControlError as exc:
-                raise BatchRiskControlError(article, successful) from exc
-            except ArticleFetchError as exc:
-                failures.append(exc)
-                print(f"[Article read failed: {exc.code}]")
-    finally:
-        session.close()
-    if len(pending) > limit:
-        print(f"Stopped at --limit {limit}; {len(pending) - limit} articles remain")
-    if failures:
-        raise BatchReadError(failures, successful)
     return 0
 
 
@@ -1047,11 +884,6 @@ def cmd_feishu_schema() -> int:
     return 0
 
 
-def _add_selector(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("index", type=int, nargs="?", help="1-based pending index")
-    parser.add_argument("--link", help="stable article URL; preferred for automation")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--format", choices=("text", "json"), default="text")
@@ -1071,26 +903,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("completed", "dismissed", "all"),
         default="all",
     )
-    mark_parser = commands.add_parser("inbox-mark")
-    mark_parser.add_argument("--link", required=True)
-    favorite_choice = mark_parser.add_mutually_exclusive_group()
-    favorite_choice.add_argument("--favorite", action="store_true")
-    favorite_choice.add_argument("--unfavorite", action="store_true")
-    state_choice = mark_parser.add_mutually_exclusive_group()
-    state_choice.add_argument("--later", action="store_true")
-    state_choice.add_argument("--active", action="store_true")
     dismiss_parser = commands.add_parser("dismiss")
     dismiss_parser.add_argument("--link", required=True)
     restore_parser = commands.add_parser("restore")
     restore_parser.add_argument("--link", required=True)
-    digest_parser = commands.add_parser("digest-plan")
-    digest_parser.add_argument("--hours", type=int)
-    digest_parser.add_argument("--limit", type=int)
-    digest_parser.add_argument("--include-later", action="store_true")
-    read_parser = commands.add_parser("read")
-    _add_selector(read_parser)
-    batch_parser = commands.add_parser("batch-read")
-    batch_parser.add_argument("--limit", type=int, default=10)
     content_parser = commands.add_parser("content")
     content_parser.add_argument("--link", required=True)
     evaluate_parser = commands.add_parser("evaluate")
@@ -1147,24 +963,10 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         if arguments.limit < 1 or arguments.limit > 100:
             raise ValueError("--limit must be between 1 and 100")
         return cmd_inbox(arguments)
-    if arguments.command == "inbox-mark":
-        if not any(
-            (arguments.favorite, arguments.unfavorite, arguments.later, arguments.active)
-        ):
-            raise ValueError("choose favorite/unfavorite and/or later/active")
-        return cmd_inbox_mark(arguments)
     if arguments.command == "dismiss":
         return cmd_dismiss(arguments)
     if arguments.command == "restore":
         return cmd_restore(arguments)
-    if arguments.command == "digest-plan":
-        return cmd_digest_plan(arguments)
-    if arguments.command == "read":
-        return cmd_read(arguments)
-    if arguments.command == "batch-read":
-        if arguments.limit < 1 or arguments.limit > 100:
-            raise ValueError("--limit must be between 1 and 100")
-        return cmd_batch_read(arguments.limit)
     if arguments.command == "content":
         return cmd_content(arguments)
     if arguments.command == "evaluate":
@@ -1221,10 +1023,8 @@ def main(argv: list[str] | None = None) -> int:
                 "done",
                 "sync-feishu",
                 "inbox",
-                "inbox-mark",
                 "dismiss",
                 "restore",
-                "digest-plan",
                 "feishu-check",
                 "feishu-schema",
             } and len(lines) == 1:

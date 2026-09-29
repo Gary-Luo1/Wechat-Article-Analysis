@@ -1560,51 +1560,6 @@ def _settings(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     return {"settings": saved["settings"], "updated_fields": sorted(updates)}, "none"
 
 
-def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
-    config = load_config()
-    current = config["preferences"]
-    if arguments.preference_command == "show":
-        return {"preferences": current}, "none"
-    if arguments.preference_command == "clear":
-        if not arguments.yes:
-            return {
-                "preview": dict(DEFAULT_CONFIG["preferences"]),
-                "current": current,
-            }, "rerun_with_yes"
-
-        def mutate_clear(config: dict[str, Any]) -> dict[str, Any]:
-            config["preferences"] = dict(DEFAULT_CONFIG["preferences"])
-            return config
-
-        saved = modify_config(mutate_clear)
-        return {"preferences": saved["preferences"], "cleared": True}, "none"
-    updates: dict[str, Any] = {}
-    list_updates = {
-        "include_topics": arguments.include_topic,
-        "exclude_keywords": arguments.exclude_keyword,
-        "preferred_accounts": arguments.preferred_account,
-    }
-    for key, values in list_updates.items():
-        if values is not None:
-            cleaned = list(
-                dict.fromkeys(" ".join(value.split()) for value in values if value.strip())
-            )
-            updates[key] = cleaned
-    if arguments.digest_hours is not None:
-        updates["digest_hours"] = arguments.digest_hours
-    if arguments.digest_limit is not None:
-        updates["digest_limit"] = arguments.digest_limit
-    if not updates:
-        raise ValueError("provide at least one preference update")
-
-    def mutate_update(config: dict[str, Any]) -> dict[str, Any]:
-        config["preferences"].update(updates)
-        return config
-
-    saved = modify_config(mutate_update)
-    return {"preferences": saved["preferences"], "updated_fields": sorted(updates)}, "none"
-
-
 # The all-data wipe enumerates every child of the state directory. Refuse
 # well-known shared/system directory names regardless of override, and refuse
 # any directory that contains no known application artifact.
@@ -1821,19 +1776,6 @@ def build_parser() -> argparse.ArgumentParser:
     set_settings.add_argument("--min-score", type=float)
     set_settings.add_argument("--content-dedup", choices=("on", "off"))
     set_settings.add_argument("--rubric", choices=("technical", "content_ops"))
-    preferences = commands.add_parser("preferences")
-    preference_commands = preferences.add_subparsers(
-        dest="preference_command", required=True
-    )
-    preference_commands.add_parser("show")
-    set_preferences = preference_commands.add_parser("set")
-    set_preferences.add_argument("--include-topic", action="append")
-    set_preferences.add_argument("--exclude-keyword", action="append")
-    set_preferences.add_argument("--preferred-account", action="append")
-    set_preferences.add_argument("--digest-hours", type=int)
-    set_preferences.add_argument("--digest-limit", type=int)
-    clear_preferences = preference_commands.add_parser("clear")
-    clear_preferences.add_argument("--yes", action="store_true")
     disable = commands.add_parser("feishu-disable")
     disable.add_argument("--yes", action="store_true")
     reset = commands.add_parser("reset")
@@ -1891,8 +1833,6 @@ def main(argv: list[str] | None = None) -> int:
             data, next_action = _feishu_auth(arguments)
         elif arguments.command == "settings":
             data, next_action = _settings(arguments)
-        elif arguments.command == "preferences":
-            data, next_action = _preferences(arguments)
         elif arguments.command == "feishu-disable":
             data, next_action = _feishu_disable(yes=arguments.yes)
         else:

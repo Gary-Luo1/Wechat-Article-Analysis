@@ -26,6 +26,3 @@ the target is not ready.
 `next_action`. Read `error.code` on failure. Do not parse prose. Score the
 dimensions in `settings.rubric`; do not assume the technical names when the
 saved rubric is `content_ops`.
-
-`digest-plan`, `batch-read`, `read`, and `inbox-mark` are outside this
-contract. Do not use them to fetch or score articles.

@@ -2,7 +2,7 @@
 
 Score every dimension from 1 to 10. Supply all five dimensions of the active rubric; the validator rejects missing, extra, non-numeric, or out-of-range values.
 
-The active rubric is `settings.rubric` from `manage status`. `technical` is the default. Switch with `manage settings set --rubric content_ops` for 公众号运营、案例和合规文章. Preferences do not add, remove, reweight, or pre-fill a dimension. Score only the user-supplied article.
+The active rubric is `settings.rubric` from `manage status`. `technical` is the default. Switch with `manage settings set --rubric content_ops` for 公众号运营、案例和合规文章. Score only the user-supplied article.
 
 ## technical
 

@@ -16,9 +16,6 @@ from an existing Feishu configuration, a previous article, or the article text.
 Never invoke a Feishu write before the current task explicitly authorizes writing
 the current article.
 
-Do not use `digest-plan`, `batch-read`, `read`, or `inbox-mark`. Those commands
-are outside link review.
-
 ## Read first, then decide Feishu
 
 When the user supplies an article URL, run `manage --format json status` and
