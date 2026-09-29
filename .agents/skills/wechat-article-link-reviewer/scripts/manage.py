@@ -12,7 +12,9 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -35,6 +37,7 @@ from bitable_client import (
     standard_field_schema,
     start_user_device_login,
     verify_feishu_identity,
+    write_verification_qr,
 )
 from config_store import (
     DEFAULT_CONFIG,
@@ -46,12 +49,26 @@ from config_store import (
     validate_config,
 )
 from feishu_target import production_feishu_target
-from paths import APP_NAME, config_path, data_dir, lock_path, queue_path, venv_dir
+from paths import (
+    APP_NAME,
+    config_path,
+    data_dir,
+    lock_path,
+    queue_path,
+    secure_write_json,
+    venv_dir,
+)
 from lark_runtime import (
     discover_global_lark_profiles,
     import_global_lark_profile,
+    isolated_cli_environment,
+    isolated_lark_apps,
+    lark_cli_work_dir,
+    parse_feishu_app_init_output,
     profile_name_for_app,
+    resolve_lark_cli,
 )
+from scoring_rubric import RUBRIC_TECHNICAL, public_rubric
 from protocol import dump, failure, success
 
 
@@ -99,6 +116,7 @@ def review_guidance(config: dict[str, Any] | None) -> dict[str, Any]:
             "setup_next_action": "none",
             "min_score": DEFAULT_CONFIG["settings"]["min_score"],
             "content_dedup": DEFAULT_CONFIG["settings"]["content_dedup"],
+            "rubric": DEFAULT_CONFIG["settings"]["rubric"],
         }
     feishu = config["feishu"]
     destination = str(feishu.get("destination") or "undecided")
@@ -136,6 +154,7 @@ def review_guidance(config: dict[str, Any] | None) -> dict[str, Any]:
         "setup_next_action": setup_next_action,
         "min_score": config["settings"]["min_score"],
         "content_dedup": config["settings"]["content_dedup"],
+        "rubric": str(config["settings"].get("rubric") or RUBRIC_TECHNICAL),
     }
 
 
@@ -276,6 +295,7 @@ def _status() -> tuple[dict[str, Any], str]:
         "settings": {
             "min_score": guidance["min_score"],
             "content_dedup": guidance["content_dedup"],
+            **public_rubric(str(guidance.get("rubric") or RUBRIC_TECHNICAL)),
         },
         "feishu_configured": bool(guidance.get("enabled")),
     }, next_action
@@ -718,6 +738,7 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
     if not re.fullmatch(r"cli_[A-Za-z0-9]+", normalized):
         raise ValueError("Feishu App ID must start with cli_ and contain only letters/digits")
     profile = profile_name_for_app(normalized)
+    state: dict[str, Any] = {"target_cleared": False}
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
         if not config["setup"]["feishu_identity_confirmed"]:
@@ -727,7 +748,11 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
         config["feishu"]["cli_profile"] = profile
         if not config["feishu"].get("binding_mode"):
             config["feishu"]["binding_mode"] = "existing"
-        if previous != normalized:
+        # The first selection has no previous app, so a table bound before the
+        # app was chosen stays in place. Switching from one real app to another
+        # drops the old target because the grant does not carry over.
+        if previous and previous != normalized:
+            state["target_cleared"] = True
             config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
             _reset_authorization(config, config["feishu"]["identity"])
             config["feishu"].update(
@@ -749,6 +774,7 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
     return {
         "app_selected": True,
         "app_id_included": False,
+        "target_cleared": state["target_cleared"],
         "private_profile": profile,
         "global_profiles_modified": False,
         "next_command": (
@@ -1141,11 +1167,13 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         }, "configure_bot_credentials_and_scopes_without_user_auth"
     if arguments.auth_command == "start":
         if waiting_login_is_resumable(authorization):
+            verification_url = str(authorization.get("verification_url") or "")
             return {
                 "identity": identity,
                 "authorization": _public_authorization(authorization),
                 "new_authorization_started": False,
-                "verification_url": authorization.get("verification_url") or "",
+                "verification_url": verification_url,
+                "qr_code_path": write_verification_qr(verification_url),
             }, "open_verification_url_then_complete_feishu_auth"
         context = feishu_identity_context(verify=True)
         if context.get("app_id_unambiguous") is False:
@@ -1178,6 +1206,7 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             "authorization": state,
             "new_authorization_started": True,
             "verification_url": fields["verification_url"],
+            "qr_code_path": write_verification_qr(fields["verification_url"]),
             "device_code_persisted": True,
             "secrets_included": False,
         }, "open_verification_url_then_complete_feishu_auth"
@@ -1260,6 +1289,255 @@ def _feishu_disable(*, yes: bool) -> tuple[dict[str, Any], str]:
     return {"disabled": True, "base_data_deleted": False}, "none"
 
 
+def _app_init_state_path() -> Path:
+    return data_dir() / "feishu-app-init.json"
+
+
+def _read_app_init_state() -> dict[str, Any]:
+    path = _app_init_state_path()
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _pid_alive(pid: object) -> bool:
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if number <= 0:
+        return False
+    try:
+        os.kill(number, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _public_app_init(state: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    data = {
+        "verification_url": str(state.get("verification_url") or ""),
+        "qr_code_path": str(state.get("qr_code_path") or ""),
+        "running": _pid_alive(state.get("pid")),
+        "app_id_included": False,
+        "secrets_included": False,
+    }
+    data.update(extra)
+    return data
+
+
+def _rename_isolated_profile(old: str, new: str) -> None:
+    if not old or old == new:
+        return
+    work = lark_cli_work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [resolve_lark_cli(), "profile", "rename", old, new],
+        cwd=work,
+        env=isolated_cli_environment(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError("could not move the new Feishu app into the skill-owned profile")
+
+
+def _bind_created_app(app_id: str) -> tuple[dict[str, Any], str]:
+    """Rename the new profile and record the App ID without echoing it."""
+    current = next(
+        (item for item in isolated_lark_apps() if item["app_id"] == app_id),
+        None,
+    )
+    target_name = profile_name_for_app(app_id)
+    old_name = current["name"] if current and current["name"] else app_id
+    _rename_isolated_profile(old_name, target_name)
+    state = _read_app_init_state()
+    try:
+        config = load_config()
+    except ConfigError:
+        config = None
+    if config is None or not config["setup"]["feishu_identity_confirmed"]:
+        state["pending_app_id"] = app_id
+        state["pid"] = 0
+        secure_write_json(_app_init_state_path(), state)
+        return _public_app_init(
+            state, app_created=True
+        ), "select_feishu_identity_then_bind_app"
+    selected = _feishu_app(app_id)
+    state["pending_app_id"] = ""
+    state["pid"] = 0
+    secure_write_json(_app_init_state_path(), state)
+    action = (
+        "rebind_feishu_table"
+        if selected.get("target_cleared")
+        else "authorize_feishu_user"
+    )
+    return _public_app_init(
+        state,
+        app_created=True,
+        app_selected=True,
+        target_cleared=bool(selected.get("target_cleared")),
+        private_profile=selected.get("private_profile") or target_name,
+    ), action
+
+
+def _app_init_log_text() -> str:
+    state = _read_app_init_state()
+    raw_path = str(state.get("log_path") or "")
+    if not raw_path:
+        return ""
+    path = Path(raw_path)
+    try:
+        path.resolve().relative_to(lark_cli_work_dir())
+    except ValueError:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[:65536]
+    except OSError:
+        return ""
+
+
+def _feishu_app_init_status() -> tuple[dict[str, Any], str]:
+    state = _read_app_init_state()
+    if not state:
+        return {
+            "started": False,
+            "app_id_included": False,
+            "secrets_included": False,
+        }, "run_feishu_app_init"
+    pending = str(state.get("pending_app_id") or "").strip()
+    if pending:
+        try:
+            config = load_config()
+        except ConfigError:
+            config = None
+        if config is not None and config["setup"]["feishu_identity_confirmed"]:
+            return _bind_created_app(pending)
+        return _public_app_init(state, app_created=True), "select_feishu_identity_then_bind_app"
+    parsed = parse_feishu_app_init_output(_app_init_log_text())
+    app_id = str(parsed.get("app_id") or "")
+    if parsed.get("succeeded") and app_id:
+        return _bind_created_app(app_id)
+    url = str(parsed.get("verification_url") or state.get("verification_url") or "")
+    if url and url != state.get("verification_url"):
+        state["verification_url"] = url
+        state["qr_code_path"] = write_verification_qr(url)
+        secure_write_json(_app_init_state_path(), state)
+    if _pid_alive(state.get("pid")):
+        return _public_app_init(
+            state
+        ), "open_verification_url_then_check_feishu_app_init"
+    return _public_app_init(
+        state,
+        started=True,
+        failed=True,
+    ), "run_feishu_app_init"
+
+
+def _start_feishu_app_init() -> tuple[dict[str, Any], str]:
+    state = _read_app_init_state()
+    if _pid_alive(state.get("pid")):
+        return _public_app_init(
+            state, new_init_started=False
+        ), "open_verification_url_then_check_feishu_app_init"
+    if isolated_lark_apps():
+        return {
+            "existing_app_present": True,
+            "app_id_included": False,
+            "secrets_included": False,
+        }, "select_existing_feishu_app"
+    work = lark_cli_work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    log_path = work / "feishu-app-init.log"
+    log_handle = log_path.open("w", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            [
+                resolve_lark_cli(),
+                "config",
+                "init",
+                "--new",
+                "--brand",
+                "feishu",
+                "--lang",
+                "zh",
+            ],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            cwd=work,
+            env=isolated_cli_environment(),
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        log_handle.close()
+        raise FileNotFoundError("lark-cli is not installed") from exc
+    log_handle.close()
+    state = {
+        "pid": process.pid,
+        "log_path": str(log_path),
+        "verification_url": "",
+        "qr_code_path": "",
+        "pending_app_id": "",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    secure_write_json(_app_init_state_path(), state)
+    deadline = time.time() + 20
+    parsed: dict[str, Any] = {}
+    while time.time() < deadline:
+        parsed = parse_feishu_app_init_output(_app_init_log_text())
+        if parsed.get("verification_url") or parsed.get("app_id"):
+            break
+        if process.poll() is not None:
+            break
+        time.sleep(0.4)
+    url = str(parsed.get("verification_url") or "")
+    state["verification_url"] = url
+    state["qr_code_path"] = write_verification_qr(url) if url else ""
+    secure_write_json(_app_init_state_path(), state)
+    if parsed.get("succeeded") and parsed.get("app_id"):
+        return _bind_created_app(str(parsed["app_id"]))
+    if url:
+        return _public_app_init(
+            state, new_init_started=True
+        ), "open_verification_url_then_check_feishu_app_init"
+    if process.poll() is not None:
+        return _public_app_init(
+            state, new_init_started=True, failed=True
+        ), "run_feishu_app_init"
+    return _public_app_init(
+        state, new_init_started=True
+    ), "check_feishu_app_init_status"
+
+
+def _feishu_app_init(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    if arguments.init_command == "status":
+        return _feishu_app_init_status()
+    if not arguments.yes:
+        if isolated_lark_apps():
+            return {
+                "existing_app_present": True,
+                "isolated_config_only": True,
+                "app_id_included": False,
+                "secrets_included": False,
+            }, "select_existing_feishu_app"
+        return {
+            "preview": "create one Feishu app inside the skill-owned lark-cli config",
+            "isolated_config_only": True,
+            "existing_app_present": False,
+            "app_id_included": False,
+            "secrets_included": False,
+        }, "rerun_with_yes"
+    return _start_feishu_app_init()
+
+
 def _settings(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     if arguments.settings_command == "show":
         config = load_config() if config_path().exists() else validate_config(deepcopy(DEFAULT_CONFIG))
@@ -1269,8 +1547,10 @@ def _settings(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         updates["min_score"] = arguments.min_score
     if arguments.content_dedup is not None:
         updates["content_dedup"] = arguments.content_dedup == "on"
+    if arguments.rubric is not None:
+        updates["rubric"] = arguments.rubric
     if not updates:
-        raise ValueError("provide --min-score and/or --content-dedup")
+        raise ValueError("provide --min-score, --content-dedup, and/or --rubric")
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
         config["settings"].update(updates)
@@ -1509,6 +1789,9 @@ def build_parser() -> argparse.ArgumentParser:
     identity.add_argument("--as", dest="identity", choices=("user", "bot"), required=True)
     app = commands.add_parser("feishu-app")
     app.add_argument("--app-id", required=True)
+    app_init = commands.add_parser("feishu-app-init")
+    app_init.add_argument("init_command", nargs="?", choices=("status",))
+    app_init.add_argument("--yes", action="store_true")
     local_profile = commands.add_parser("feishu-local-profile")
     local_profile_commands = local_profile.add_subparsers(
         dest="local_profile_command", required=True
@@ -1537,6 +1820,7 @@ def build_parser() -> argparse.ArgumentParser:
     set_settings = settings_commands.add_parser("set")
     set_settings.add_argument("--min-score", type=float)
     set_settings.add_argument("--content-dedup", choices=("on", "off"))
+    set_settings.add_argument("--rubric", choices=("technical", "content_ops"))
     preferences = commands.add_parser("preferences")
     preference_commands = preferences.add_subparsers(
         dest="preference_command", required=True
@@ -1581,7 +1865,13 @@ def main(argv: list[str] | None = None) -> int:
             next_action = "run_feishu_context_then_authorize_only_if_needed"
         elif arguments.command == "feishu-app":
             data = _feishu_app(arguments.app_id)
-            next_action = "reuse_or_configure_private_lark_profile"
+            next_action = (
+                "rebind_feishu_table"
+                if data.get("target_cleared")
+                else "reuse_or_configure_private_lark_profile"
+            )
+        elif arguments.command == "feishu-app-init":
+            data, next_action = _feishu_app_init(arguments)
         elif arguments.command == "feishu-local-profile":
             data, next_action = _feishu_local_profile(arguments)
         elif arguments.command == "feishu-manager-access":

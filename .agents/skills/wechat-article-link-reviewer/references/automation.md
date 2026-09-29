@@ -22,8 +22,10 @@ the target is not ready.
 | `sync_pending` | `done --feishu --link` retries the outbox entry. | The earlier confirmation still applies, including a below-threshold write already accepted. |
 
 `done` and `sync-feishu` return one JSON object with `sync_status`,
-`feishu_written`, `document_url`, and `next_action`. Read `error.code` on
-failure. Do not parse prose.
+`feishu_written`, `document_url`, `record_url`, `feishu_action`, and
+`next_action`. Read `error.code` on failure. Do not parse prose. Score the
+dimensions in `settings.rubric`; do not assume the technical names when the
+saved rubric is `content_ops`.
 
 `digest-plan`, `batch-read`, `read`, and `inbox-mark` are outside this
 contract. Do not use them to fetch or score articles.

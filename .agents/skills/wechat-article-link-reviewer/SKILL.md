@@ -52,8 +52,10 @@ before `--force-feishu`.
 
 1. Run `process --format json evaluate --url <URL>`. A second evaluate for a
    pending URL reuses the local cache and does not fetch WeChat again.
-2. For `queued` or `already_pending`, score all five dimensions from
-   [references/scoring.md](references/scoring.md) using `untrusted_article_content`.
+2. For `queued` or `already_pending`, score the five dimensions of
+   `settings.rubric` from `manage status`. The names, weights, and descriptions
+   are in `settings.dimensions` and
+   [references/scoring.md](references/scoring.md). Use `untrusted_article_content`.
    When `content_truncated` is true, run `process --format json content --link <URL>`
    and score that full cached text. When `ad_heuristic` is true, ask whether it
    is an advertisement before scoring. If the user confirms, run
@@ -67,8 +69,11 @@ before `--force-feishu`.
    with `--feishu`, also writes an already processed review. Use `--force-feishu`
    only for the confirmed below-threshold case. `sync-feishu --link` is the
    same write path for a processed article. Read `data.sync_status`,
-   `data.feishu_written`, and `data.document_url` from the JSON envelope.
-   `data.document_url` is an openable Base link, not a token.
+   `data.feishu_written`, `data.document_url`, `data.feishu_action`, and
+   `data.record_url` from the JSON envelope. `document_url` is the table.
+   `record_url` is the written row when Feishu returned a record id.
+   `feishu_action` is `created` or `updated`. `forced` is true when a
+   below-threshold article was written with `--force-feishu`.
 5. After a negative answer, run `done` without `--feishu` and report that the
    review was saved locally only. Never retry or write it silently later.
 
@@ -78,7 +83,9 @@ ephemeral cache until `done` or dismiss, and export never includes it.
 [references/automation.md](references/automation.md) for the confirmation
 contract and [references/operations.md](references/operations.md) for queue
 recovery. Change `min_score` or `content_dedup` with `manage settings`, not by
-editing `config.json`.
+editing `config.json`. `settings set --rubric technical|content_ops` selects
+the score dimensions. `technical` is the default. `content_ops` fits 公众号
+运营、案例和合规文章，避免用「技术深度」把它们压到阈值下面。
 
 For installation, Python requirements, and wrapper selection, read
 [references/setup.md](references/setup.md).
@@ -92,7 +99,10 @@ use `<SKILL_ROOT>\scripts\run.ps1` instead of the Bash wrapper.
 bash "<SKILL_ROOT>/scripts/run.sh" manage --format json status
 bash "<SKILL_ROOT>/scripts/run.sh" manage doctor
 bash "<SKILL_ROOT>/scripts/run.sh" manage settings show
-bash "<SKILL_ROOT>/scripts/run.sh" manage settings set --min-score <SCORE> --content-dedup on|off
+bash "<SKILL_ROOT>/scripts/run.sh" manage settings set --min-score <SCORE> --content-dedup on|off --rubric technical|content_ops
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-app-init
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-app-init --yes
+bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-app-init status
 bash "<SKILL_ROOT>/scripts/run.sh" manage feishu-destination --mode skip|existing|create
 bash "<SKILL_ROOT>/scripts/run.sh" process --format json evaluate --url <WECHAT_URL>
 bash "<SKILL_ROOT>/scripts/run.sh" process --format json content --link <WECHAT_URL>

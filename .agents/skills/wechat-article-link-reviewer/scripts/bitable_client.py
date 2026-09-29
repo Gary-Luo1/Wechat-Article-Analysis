@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from lark_runtime import (
+    global_config_is_skill_owned,
     global_lark_config_fingerprint,
     lark_cli_config_dir,
     lark_cli_environment,
@@ -412,7 +413,11 @@ def _run_lark(
     lark_cli_config_dir().mkdir(parents=True, exist_ok=True)
     work_dir = lark_cli_work_dir()
     work_dir.mkdir(parents=True, exist_ok=True)
-    global_before = global_lark_config_fingerprint()
+    # A process whose HOME is already the skill directory would treat the
+    # isolated config as the user's global config and reject a normal login
+    # write. That file is owned by the skill.
+    watch_global_config = not global_config_is_skill_owned()
+    global_before = global_lark_config_fingerprint() if watch_global_config else None
     last_error: LarkCLIError | None = None
     for attempt in range(max(1, retries)):
         try:
@@ -427,7 +432,10 @@ def _run_lark(
                 env=lark_cli_environment(),
                 cwd=work_dir,
             )
-            if global_lark_config_fingerprint() != global_before:
+            if (
+                watch_global_config
+                and global_lark_config_fingerprint() != global_before
+            ):
                 raise LarkCLIError(
                     "the user's global ~/.lark-cli/config.json changed during an "
                     "isolated Skill command; stop and inspect the CLI installation",
@@ -1134,6 +1142,46 @@ def created_base_document_url(payload: dict[str, Any]) -> str:
     return ""
 
 
+def write_verification_qr(url: str) -> str:
+    """Write a PNG QR for an authorization URL. Return "" when it cannot be made."""
+    verification_url = str(url or "").strip()
+    if not verification_url.startswith("https://"):
+        return ""
+    try:
+        cli = resolve_lark_cli()
+    except FileNotFoundError:
+        return ""
+    work_dir = lark_cli_work_dir()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    destination = work_dir / "feishu-auth-qr.png"
+    try:
+        result = subprocess.run(
+            [
+                cli,
+                "auth",
+                "qrcode",
+                verification_url,
+                "--output",
+                str(destination),
+                "--size",
+                "512",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+            env=lark_cli_environment(),
+            cwd=work_dir,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0 or not destination.is_file():
+        return ""
+    return str(destination)
+
+
 def feishu_document_url(feishu: dict[str, Any]) -> str:
     stored = str(feishu.get("base_url") or "").strip()
     table_id = str(feishu.get("table_id") or "").strip()
@@ -1146,6 +1194,22 @@ def feishu_document_url(feishu: dict[str, Any]) -> str:
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     if table_id and "table" not in query:
         query["table"] = table_id
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+
+
+def feishu_record_url(feishu: dict[str, Any], record_id: str) -> str:
+    """Return an openable row link. Record ids stay inside that URL."""
+    identifier = str(record_id or "").strip()
+    if not re.fullmatch(r"rec[A-Za-z0-9]+", identifier):
+        return ""
+    document_url = feishu_document_url(feishu)
+    if not document_url:
+        return ""
+    parts = urlsplit(document_url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query["record"] = identifier
     return urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
     )
@@ -1277,6 +1341,13 @@ def preflight_feishu(feishu: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _record_id_from_payload(payload: Any) -> str:
+    for value in _find_values(payload, {"recordid"}):
+        if re.fullmatch(r"rec[A-Za-z0-9]+", value):
+            return value
+    return ""
+
+
 def _upsert_record(
     feishu: dict[str, Any],
     record: dict[str, Any],
@@ -1284,14 +1355,15 @@ def _upsert_record(
     url_field: str,
     identity: str,
     dry_run: bool,
-) -> None:
-    record_id = find_record_by_url(
+) -> dict[str, str]:
+    existing_id = find_record_by_url(
         feishu["base_token"],
         feishu["table_id"],
         str(record[url_field]),
         url_field,
         identity=identity,
-    )
+    ) or ""
+    had_existing = bool(existing_id)
     args = [
         "base",
         "+record-upsert",
@@ -1306,14 +1378,16 @@ def _upsert_record(
         "--format",
         "json",
     ]
-    if record_id:
-        args.extend(["--record-id", record_id])
+    if existing_id:
+        args.extend(["--record-id", existing_id])
     if dry_run:
         args.append("--dry-run")
+        _run_lark(args, retries=1)
+        return {"action": "dry_run", "record_id": ""}
     try:
-        _run_lark(args, retries=3 if record_id or dry_run else 1)
+        payload = _run_lark(args, retries=3 if existing_id else 1)
     except LarkCLIError as exc:
-        if record_id or dry_run or not exc.retryable:
+        if existing_id or not exc.retryable:
             raise
         # A create may have succeeded even when its response was lost. Never
         # replay it blindly: query by the stable URL and update only if found.
@@ -1326,7 +1400,13 @@ def _upsert_record(
         )
         if not recovered_id:
             raise
-        _run_lark([*args, "--record-id", recovered_id])
+        payload = _run_lark([*args, "--record-id", recovered_id])
+        existing_id = recovered_id
+    record_id = _record_id_from_payload(payload) or existing_id
+    return {
+        "action": "updated" if had_existing else "created",
+        "record_id": record_id,
+    }
 
 
 def upsert_article(
@@ -1335,7 +1415,7 @@ def upsert_article(
     metadata: dict[str, Any],
     *,
     dry_run: bool = False,
-) -> None:
+) -> dict[str, str]:
     check = preflight_feishu(feishu)
     mapping = check["resolved"]
     record = build_mapped_record(article, metadata, mapping)
@@ -1351,10 +1431,16 @@ def upsert_article(
     )
     lock_name = hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()[:24]
     with process_lock(data_dir() / f"feishu-upsert-{lock_name}.lock"):
-        _upsert_record(
+        written = _upsert_record(
             feishu,
             record,
             url_field=url_field,
             identity=identity,
             dry_run=dry_run,
         )
+    return {
+        "action": written["action"],
+        "record_url": ""
+        if dry_run
+        else feishu_record_url(feishu, written.get("record_id", "")),
+    }

@@ -45,6 +45,7 @@ from queue_helpers import (
     update_sync_status,
 )
 from scoring_rubric import (
+    RUBRIC_TECHNICAL,
     calculate_score,
     format_rationale,
     is_advertisement,
@@ -537,10 +538,19 @@ def _read_dimensions(arguments: argparse.Namespace) -> Any:
         raise ValueError(f"{source} is not valid JSON: {exc}") from exc
 
 
+def _active_rubric() -> str:
+    try:
+        config = load_config()
+    except ConfigError:
+        return RUBRIC_TECHNICAL
+    return str(config["settings"].get("rubric") or RUBRIC_TECHNICAL)
+
+
 def _score_metadata(arguments: argparse.Namespace) -> dict[str, Any]:
     dimensions = _read_dimensions(arguments)
-    score = calculate_score(dimensions)
-    rationale = arguments.rationale or format_rationale(dimensions)
+    rubric = _active_rubric()
+    score = calculate_score(dimensions, rubric=rubric)
+    rationale = arguments.rationale or format_rationale(dimensions, rubric=rubric)
     tags = [item.strip() for item in arguments.tags.split(",") if item.strip()]
     return {
         "score": score,
@@ -549,21 +559,26 @@ def _score_metadata(arguments: argparse.Namespace) -> dict[str, Any]:
         "rationale": rationale.strip(),
         "tags": tags,
         "ad": False,
+        "rubric": rubric,
     }
 
 
-def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
+def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> dict[str, str]:
     config = load_config()
     if not config["setup"]["feishu_identity_confirmed"]:
         raise ConfigError("confirm Feishu identity before checking or writing the target")
     feishu = config["feishu"]
     if not feishu["enabled"]:
         raise ConfigError("Feishu sync is disabled; complete Agent setup first")
-    production_feishu_target(feishu).sync(
+    written = production_feishu_target(feishu).sync(
         entry["article"], entry["metadata"], dry_run=dry_run
     )
     if not dry_run:
         update_sync_status(entry["article"]["link"], "synced")
+    return {
+        "action": str(written.get("action") or ""),
+        "record_url": "" if dry_run else str(written.get("record_url") or ""),
+    }
 
 
 def _feishu_document_url() -> str:
@@ -603,6 +618,9 @@ def _review_payload(
     message: str,
     below_threshold: bool = False,
     document_url: str = "",
+    feishu_action: str = "",
+    record_url: str = "",
+    forced: bool = False,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -612,7 +630,10 @@ def _review_payload(
         "sync_status": sync_status,
         "feishu_written": feishu_written,
         "document_url": document_url,
+        "record_url": record_url,
+        "feishu_action": feishu_action,
         "below_threshold": below_threshold,
+        "forced": forced,
         "message": message,
         "next_action": next_action,
     }
@@ -681,7 +702,7 @@ def _sync_processed(
     if config is None:
         raise ConfigError("Feishu sync requires configuration")
     try:
-        _sync_entry(entry, dry_run=dry_run)
+        written = _sync_entry(entry, dry_run=dry_run)
     except (ConfigError, LarkCLIError, ValueError) as exc:
         if not dry_run:
             update_sync_status(link, "pending", str(exc))
@@ -701,6 +722,9 @@ def _sync_processed(
             sync_status="pending" if dry_run else "synced",
             feishu_written=not dry_run,
             document_url=document_url,
+            record_url=written["record_url"],
+            feishu_action=written["action"],
+            forced=bool(force_feishu and below),
             next_action="none",
             message=message,
         )
@@ -827,8 +851,10 @@ def cmd_done(arguments: argparse.Namespace) -> int:
             status = "pending"
         else:
             status = "skipped_low_score"
+        forced_below = bool(arguments.force_feishu) and not should_sync(score, minimum)
     else:
         status = "not_requested"
+        forced_below = False
     if arguments.dry_run:
         if status != "pending":
             return _emit_review(
@@ -846,7 +872,7 @@ def cmd_done(arguments: argparse.Namespace) -> int:
                     ),
                 )
             )
-        _sync_entry({"article": article, "metadata": metadata}, dry_run=True)
+        written = _sync_entry({"article": article, "metadata": metadata}, dry_run=True)
         return _emit_review(
             _review_payload(
                 status="dry_run",
@@ -855,6 +881,7 @@ def cmd_done(arguments: argparse.Namespace) -> int:
                 score=score,
                 sync_status="pending",
                 feishu_written=False,
+                feishu_action=written["action"],
                 next_action="none",
                 message=f"Dry run succeeded; article remains pending: {title}",
             )
@@ -879,7 +906,7 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         )
     if status == "pending":
         try:
-            _sync_entry(entry, dry_run=False)
+            written = _sync_entry(entry, dry_run=False)
         except (ConfigError, LarkCLIError, ValueError) as exc:
             update_sync_status(link, "pending", str(exc))
             _raise_sync_failures(
@@ -895,6 +922,9 @@ def cmd_done(arguments: argparse.Namespace) -> int:
                 sync_status="synced",
                 feishu_written=True,
                 document_url=_feishu_document_url(),
+                record_url=written["record_url"],
+                feishu_action=written["action"],
+                forced=forced_below,
                 next_action="none",
                 message=f"Completed: {title} (score {score})",
             )

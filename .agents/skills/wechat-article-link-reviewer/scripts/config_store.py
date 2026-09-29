@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterator
 
 from paths import config_path, data_dir, secure_write_json
 from process_lock import process_lock
+from scoring_rubric import RUBRIC_NAMES, RUBRIC_TECHNICAL
 
 
 CONFIG_VERSION = 13
@@ -59,6 +60,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # summaries.
         "content_dedup": False,
         "min_score": 6.0,
+        "rubric": RUBRIC_TECHNICAL,
         "output_language": "auto",
     },
     "preferences": {
@@ -357,6 +359,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(f"settings.{key} must be between {minimum} and {maximum}")
     if not isinstance(settings.get("content_dedup"), bool):
         raise ConfigError("settings.content_dedup must be boolean")
+    if settings.get("rubric") not in RUBRIC_NAMES:
+        raise ConfigError("settings.rubric must be technical or content_ops")
     if settings.get("output_language") not in {"auto", "zh", "en"}:
         raise ConfigError("settings.output_language must be auto, zh, or en")
     preferences = config["preferences"]

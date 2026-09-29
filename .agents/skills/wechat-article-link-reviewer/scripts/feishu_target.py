@@ -17,7 +17,9 @@ class FeishuTarget:
         *,
         cli_info: Callable[[], dict[str, Any]],
         preflight: Callable[[dict[str, Any]], dict[str, Any]],
-        upsert: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], bool], None],
+        upsert: Callable[
+            [dict[str, Any], dict[str, Any], dict[str, Any], bool], dict[str, str]
+        ],
     ) -> None:
         self._feishu = feishu
         self._cli_info = cli_info
@@ -40,13 +42,13 @@ class FeishuTarget:
 
     def sync(
         self, article: dict[str, Any], metadata: dict[str, Any], *, dry_run: bool = False
-    ) -> None:
+    ) -> dict[str, str]:
         """Upsert one processed article to this already-configured target."""
         if not self._feishu.get("enabled"):
             raise LarkCLIError(
                 "Feishu sync is disabled; configure a target before requesting sync", kind="config"
             )
-        self._upsert(self._feishu, article, metadata, dry_run)
+        return self._upsert(self._feishu, article, metadata, dry_run)
 
 
 def production_feishu_target(feishu: dict[str, Any]) -> FeishuTarget:

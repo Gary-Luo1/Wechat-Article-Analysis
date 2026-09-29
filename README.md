@@ -44,7 +44,7 @@ Cursor 等独立环境只能用飞书**用户身份**。Bot 写入仅限受支�
 - [安装与运行环境](.agents/skills/wechat-article-link-reviewer/references/setup.md)
 - [队列与运维](.agents/skills/wechat-article-link-reviewer/references/operations.md)
 
-评分后的确认规则以 `manage status` 的 `review.after_scoring` 为准。完成审阅统一用 `process done --link`；`--format json` 的结果里看 `feishu_written` 和 `document_url`。阈值和正文去重用 `manage settings`。
+评分后的确认规则以 `manage status` 的 `review.after_scoring` 为准。完成审阅统一用 `process done --link`；`--format json` 的结果里看 `feishu_written`、`document_url` 和 `record_url`。阈值、正文去重和评分标尺用 `manage settings`。默认标尺是 `technical`；公众号运营和合规文章用 `manage settings set --rubric content_ops`。
 
 ## 检查环境
 

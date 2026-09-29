@@ -19,7 +19,7 @@ default. Turn it on with `manage settings set --content-dedup on`.
 
 ## Complete a review
 
-After independently scoring all five dimensions, apply the confirmation gate
+After independently scoring the active rubric's five dimensions, apply the confirmation gate
 from [automation.md](automation.md). Submit one score object. `--feishu` writes
 both a pending review and an already processed review:
 
@@ -31,9 +31,12 @@ process --format json done --link <WECHAT_URL> --feishu --force-feishu
 ```
 
 `--format json` returns `{ok, data, next_action}`. `data` includes `score`,
-`sync_status`, `feishu_written`, `document_url`, and `below_threshold`.
-`document_url` is an openable Base link. `sync-feishu --link` uses the same
-write path for a processed article.
+`sync_status`, `feishu_written`, `document_url`, `record_url`, `feishu_action`,
+`below_threshold`, and `forced`. `document_url` is the table. `record_url` is
+the written row when a record id came back. `feishu_action` is `created` or
+`updated`. `forced` is true for a below-threshold write that used
+`--force-feishu`. `sync-feishu --link` uses the same write path for a processed
+article.
 
 Use `--force-feishu` only for an explicitly confirmed below-threshold write, or
 when the user explicitly asks to rewrite that one already synced article.
@@ -43,6 +46,7 @@ The default threshold is `6.0`. Change it with:
 manage settings show
 manage settings set --min-score <SCORE>
 manage settings set --content-dedup on|off
+manage settings set --rubric technical|content_ops
 ```
 
 A lower score is saved locally as `skipped_low_score`. Failed Feishu writes
