@@ -391,6 +391,7 @@ class FeishuSetupTests(IsolatedState):
         self.assertEqual(parsed["app_id"], "cli_abc123")
         self.assertTrue(str(parsed["verification_url"]).startswith("https://open.feishu.cn/"))
 
+    @unittest.skipIf(os.name == "nt", "the stand-in lark-cli is a POSIX shell script")
     def test_skill_owned_home_can_receive_a_login_write(self) -> None:
         home = Path(self.tmp.name) / "lark-cli-home"
         config_dir = home / ".lark-cli"
