@@ -185,9 +185,6 @@ def add_pending(articles: list[dict[str, Any]], *, content_dedup: bool = False) 
             if digest:
                 article["content_hash"] = digest
             article["discovered_at"] = datetime.now(timezone.utc).isoformat()
-            article.setdefault("favorite", False)
-            article.setdefault("inbox_state", "active")
-            article["inbox_updated_at"] = article["discovered_at"]
             data["pending"].append(article)
             existing_urls.add(normalized)
             if digest:
@@ -264,9 +261,6 @@ def add_pending_with_verified_read(
         if digest:
             article["content_hash"] = digest
         article["discovered_at"] = datetime.now(timezone.utc).isoformat()
-        article.setdefault("favorite", False)
-        article.setdefault("inbox_state", "active")
-        article["inbox_updated_at"] = article["discovered_at"]
         article["read_state"] = read_state
         data["pending"].append(article)
         _write_unlocked(data)
@@ -300,29 +294,6 @@ def has_verified_read(article: dict[str, Any]) -> bool:
     )
 
 
-def record_verified_read(link: str, text: str) -> dict[str, Any]:
-    """Atomically persist bounded proof that a pending article was read."""
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("article text must be non-empty before recording a verified read")
-    normalized = normalize_url(link)
-    state = {
-        "status": "verified",
-        "verified_at": datetime.now(timezone.utc).isoformat(),
-        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-    }
-    with queue_lock():
-        data = _read_unlocked()
-        article = next(
-            (item for item in data["pending"] if item.get("normalized_url") == normalized),
-            None,
-        )
-        if article is None:
-            raise LookupError("article is no longer pending")
-        article["read_state"] = state
-        _write_unlocked(data)
-        return deepcopy(article)
-
-
 def dismiss_article(link: str) -> dict[str, Any]:
     """Move a pending article to a reversible dismissed processed entry."""
     normalized = normalize_url(link)
@@ -345,7 +316,6 @@ def dismiss_article(link: str) -> dict[str, Any]:
             item for item in data["pending"] if item.get("normalized_url") != normalized
         ]
         now = datetime.now(timezone.utc).isoformat()
-        article["inbox_updated_at"] = now
         entry = {
             "article": deepcopy(article),
             "content_hash": article.get("content_hash"),
@@ -370,8 +340,6 @@ def restore_dismissed(link: str) -> dict[str, Any]:
         if any(item.get("normalized_url") == normalized for item in data["pending"]):
             raise ValueError("article is already pending")
         article = deepcopy(entry["article"])
-        article["inbox_state"] = "active"
-        article["inbox_updated_at"] = datetime.now(timezone.utc).isoformat()
         data["pending"].append(article)
         del data["processed"][normalized]
         _write_unlocked(data)

@@ -688,10 +688,6 @@ def _datetime_value(timestamp: Any) -> str:
     return datetime.fromtimestamp(value, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _https_wechat_url(value: Any) -> str:
-    return upgrade_wechat_article_url(value)
-
-
 def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     tags = metadata.get("tags", [])
     if isinstance(tags, str):
@@ -700,7 +696,7 @@ def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[s
         "title": str(article.get("title", "")),
         "account": str(article.get("account", "")),
         "account_id": str(article.get("account_id") or article.get("account", "")),
-        "url": _https_wechat_url(article.get("link", "")),
+        "url": upgrade_wechat_article_url(article.get("link", "")),
         "summary": str(metadata.get("summary") or article.get("digest", ""))[:500],
         "published_at": _datetime_value(article.get("update_time")),
         "fetched_at": _datetime_value(time.time()),
@@ -709,13 +705,6 @@ def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[s
         "tags": [str(tag) for tag in tags],
         "read_status": "已读",
     }
-
-
-def build_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    """Build a record using the standard field names (compatibility helper)."""
-    logical = _logical_record(article, metadata)
-    logical["tags"] = ", ".join(logical["tags"])
-    return {FIELD_SPECS[key]["name"]: value for key, value in logical.items()}
 
 
 def _select_options(field: dict[str, Any]) -> set[str]:
