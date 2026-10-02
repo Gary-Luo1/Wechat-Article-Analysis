@@ -54,21 +54,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "field_mapping": {},
     },
     "settings": {
-        "request_delay": 3.0,
         # URL identity is authoritative. Optional content deduplication is off by
         # default because distinct articles may legitimately reuse titles and
         # summaries.
         "content_dedup": False,
         "min_score": 6.0,
         "rubric": RUBRIC_TECHNICAL,
-        "output_language": "auto",
-    },
-    "preferences": {
-        "include_topics": [],
-        "exclude_keywords": [],
-        "preferred_accounts": [],
-        "digest_hours": 24,
-        "digest_limit": 5,
     },
     "health": {
         "feishu": {
@@ -116,10 +107,12 @@ LEGACY_FIELD_MAPPING = {
 def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(DEFAULT_CONFIG)
     merged["version"] = raw.get("version", 1)
-    for section in ("feishu", "settings", "preferences"):
+    for section in ("feishu", "settings"):
         value = raw.get(section, {})
         if isinstance(value, dict):
             merged[section].update(value)
+    for unused in ("request_delay", "output_language"):
+        merged["settings"].pop(unused, None)
     raw_setup = raw.get("setup", {})
     if isinstance(raw_setup, dict):
         nested_setup = {"feishu_authorization"}
@@ -348,7 +341,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(f"setup.feishu_authorization.{key} must be a string")
     settings = config["settings"]
     numeric_rules = {
-        "request_delay": (0, 60),
         "min_score": (1, 10),
     }
     for key, (minimum, maximum) in numeric_rules.items():
@@ -361,24 +353,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("settings.content_dedup must be boolean")
     if settings.get("rubric") not in RUBRIC_NAMES:
         raise ConfigError("settings.rubric must be technical or content_ops")
-    if settings.get("output_language") not in {"auto", "zh", "en"}:
-        raise ConfigError("settings.output_language must be auto, zh, or en")
-    preferences = config["preferences"]
-    if not isinstance(preferences, dict):
-        raise ConfigError("preferences must be an object")
-    for key in ("include_topics", "exclude_keywords", "preferred_accounts"):
-        values = preferences.get(key)
-        if not isinstance(values, list) or len(values) > 100:
-            raise ConfigError(f"preferences.{key} must be a list with at most 100 items")
-        for index, value in enumerate(values):
-            if not isinstance(value, str) or not value.strip():
-                raise ConfigError(f"preferences.{key}[{index}] must be a non-empty string")
-    digest_hours = preferences.get("digest_hours")
-    if not isinstance(digest_hours, int) or isinstance(digest_hours, bool) or not 1 <= digest_hours <= 8760:
-        raise ConfigError("preferences.digest_hours must be an integer between 1 and 8760")
-    digest_limit = preferences.get("digest_limit")
-    if not isinstance(digest_limit, int) or isinstance(digest_limit, bool) or not 1 <= digest_limit <= 50:
-        raise ConfigError("preferences.digest_limit must be an integer between 1 and 50")
     _validate_feishu(config["feishu"])
     _validate_health(config["health"])
     return config
@@ -502,6 +476,5 @@ def redacted_config(config: dict[str, Any]) -> dict[str, Any]:
             "field_mapping": deepcopy(validated["feishu"]["field_mapping"]),
         },
         "settings": deepcopy(validated["settings"]),
-        "preferences": deepcopy(validated["preferences"]),
         "health": deepcopy(validated["health"]),
     }

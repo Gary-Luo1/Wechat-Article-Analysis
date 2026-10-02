@@ -31,15 +31,9 @@ def _item_matches(
     *,
     account: str,
     query: str,
-    favorite: bool,
-    state: str,
     disposition: str,
 ) -> bool:
     article = item["article"]
-    if favorite and not item["favorite"]:
-        return False
-    if item["status"] == "pending" and state != "all" and item["inbox_state"] != state:
-        return False
     if (
         item["status"] == "processed"
         and disposition != "all"
@@ -65,18 +59,6 @@ def _queue_summary(queue: dict[str, Any]) -> dict[str, Any]:
     return {
         "pending": len(queue["pending"]),
         "processed": len(queue["processed"]),
-        "favorites": sum(
-            bool(article.get("favorite", False)) for article in queue["pending"]
-        )
-        + sum(
-            bool(entry.get("article", {}).get("favorite", False))
-            for entry in queue["processed"].values()
-            if isinstance(entry, dict)
-        ),
-        "later": sum(
-            article.get("inbox_state", "active") == "later"
-            for article in queue["pending"]
-        ),
         "dismissed": sum(
             entry.get("metadata", {}).get("disposition") == "dismissed"
             for entry in queue["processed"].values()
@@ -95,14 +77,6 @@ def queue_summary() -> dict[str, Any]:
     return _queue_summary(read_queue())
 
 
-def known_urls() -> set[str]:
-    """Return every article URL identity currently in the queue."""
-    queue = read_queue()
-    return {item["normalized_url"] for item in queue["pending"]} | set(
-        queue["processed"]
-    )
-
-
 def query_inbox(
     *,
     status: str = "pending",
@@ -110,8 +84,6 @@ def query_inbox(
     query: str = "",
     sort: str = "newest",
     limit: int = 20,
-    favorite: bool = False,
-    state: str = "all",
     disposition: str = "all",
 ) -> dict[str, Any]:
     """Return one stable, filtered view of pending and processed articles."""
@@ -121,8 +93,6 @@ def query_inbox(
         raise ValueError("sort must be newest or oldest")
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
-    if state not in {"active", "later", "all"}:
-        raise ValueError("state must be active, later, or all")
     if disposition not in {"completed", "dismissed", "all"}:
         raise ValueError("disposition must be completed, dismissed, or all")
 
@@ -135,8 +105,6 @@ def query_inbox(
                 "pending_index": index,
                 "article": article,
                 "discovered_at": article.get("discovered_at", ""),
-                "favorite": bool(article.get("favorite", False)),
-                "inbox_state": str(article.get("inbox_state", "active")),
             }
             for index, article in enumerate(queue["pending"], start=1)
         )
@@ -150,8 +118,6 @@ def query_inbox(
                 "score": entry.get("metadata", {}).get("score"),
                 "summary": entry.get("metadata", {}).get("summary", ""),
                 "tags": entry.get("metadata", {}).get("tags", []),
-                "favorite": bool(entry["article"].get("favorite", False)),
-                "inbox_state": str(entry["article"].get("inbox_state", "active")),
                 "disposition": str(entry.get("metadata", {}).get("disposition", "completed")),
             }
             for entry in queue["processed"].values()
@@ -167,8 +133,6 @@ def query_inbox(
             item,
             account=normalized_account,
             query=normalized_query,
-            favorite=favorite,
-            state=state,
             disposition=disposition,
         )
     ]
@@ -183,8 +147,6 @@ def query_inbox(
             "query": query,
             "sort": sort,
             "limit": limit,
-            "favorite": bool(favorite),
-            "state": state,
             "disposition": disposition,
         },
         "items": selected,

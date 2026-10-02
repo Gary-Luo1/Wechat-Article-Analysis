@@ -128,8 +128,6 @@ def cmd_inbox(arguments: argparse.Namespace) -> int:
         query=arguments.query or "",
         sort=arguments.sort,
         limit=arguments.limit,
-        favorite=arguments.favorite,
-        state=arguments.state,
         disposition=arguments.disposition,
     )
     if arguments.format == "json":
@@ -896,8 +894,6 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_parser.add_argument("--query")
     inbox_parser.add_argument("--sort", choices=("newest", "oldest"), default="newest")
     inbox_parser.add_argument("--limit", type=int, default=20)
-    inbox_parser.add_argument("--favorite", action="store_true")
-    inbox_parser.add_argument("--state", choices=("active", "later", "all"), default="all")
     inbox_parser.add_argument(
         "--disposition",
         choices=("completed", "dismissed", "all"),

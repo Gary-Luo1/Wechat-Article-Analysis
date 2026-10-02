@@ -1688,7 +1688,7 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             return config
 
         modify_config(mutate_reset)
-        return {"cleared": "feishu", "preserved": ["settings", "preferences", "queue"]}, "provide_article_link"
+        return {"cleared": "feishu", "preserved": ["settings", "queue"]}, "provide_article_link"
     root = data_dir().resolve()
     for target in existing:
         if target.parent != root and target not in {
