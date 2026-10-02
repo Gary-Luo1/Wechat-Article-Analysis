@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from article_cache import delete_article_text
 from paths import lock_path, queue_path, secure_write_json
 from process_lock import process_lock
 from url_identity import canonicalize_wechat_article_url, normalize_article_url
@@ -322,47 +323,6 @@ def record_verified_read(link: str, text: str) -> dict[str, Any]:
         return deepcopy(article)
 
 
-def update_inbox_item(
-    link: str,
-    *,
-    favorite: bool | None = None,
-    state: str | None = None,
-) -> dict[str, Any]:
-    """Update reversible inbox metadata on a pending or processed article."""
-    if favorite is None and state is None:
-        raise ValueError("provide favorite or state update")
-    if state is not None and state not in {"active", "later"}:
-        raise ValueError("inbox state must be active or later")
-    normalized = normalize_url(link)
-    with queue_lock():
-        data = _read_unlocked()
-        article = next(
-            (item for item in data["pending"] if item.get("normalized_url") == normalized),
-            None,
-        )
-        location = "pending"
-        if article is None:
-            entry = data["processed"].get(normalized)
-            article = entry.get("article") if isinstance(entry, dict) else None
-            location = "processed"
-        if not isinstance(article, dict):
-            raise LookupError("article not found in inbox")
-        if state is not None and location != "pending":
-            raise ValueError("only pending articles can be moved to active or later")
-        if favorite is not None:
-            article["favorite"] = favorite
-        if state is not None:
-            article["inbox_state"] = state
-        article["inbox_updated_at"] = datetime.now(timezone.utc).isoformat()
-        _write_unlocked(data)
-        return {
-            "location": location,
-            "article": deepcopy(article),
-            "favorite": bool(article.get("favorite", False)),
-            "inbox_state": str(article.get("inbox_state", "active")),
-        }
-
-
 def dismiss_article(link: str) -> dict[str, Any]:
     """Move a pending article to a reversible dismissed processed entry."""
     normalized = normalize_url(link)
@@ -378,6 +338,7 @@ def dismiss_article(link: str) -> dict[str, Any]:
                 isinstance(existing, dict)
                 and existing.get("metadata", {}).get("disposition") == "dismissed"
             ):
+                delete_article_text(link)
                 return deepcopy(existing)
             raise LookupError("only pending articles can be dismissed")
         data["pending"] = [
@@ -394,6 +355,7 @@ def dismiss_article(link: str) -> dict[str, Any]:
         }
         data["processed"][normalized] = entry
         _write_unlocked(data)
+        delete_article_text(link)
         return deepcopy(entry)
 
 
@@ -437,6 +399,7 @@ def complete_article(
                     raise LookupError(
                         "article was dismissed and cannot be completed; restore it first"
                     )
+                delete_article_text(link)
                 return deepcopy(existing)
             raise LookupError("article is no longer pending")
         data["pending"] = [
@@ -451,6 +414,7 @@ def complete_article(
         }
         data["processed"][normalized] = entry
         _write_unlocked(data)
+        delete_article_text(link)
         return deepcopy(entry)
 
 

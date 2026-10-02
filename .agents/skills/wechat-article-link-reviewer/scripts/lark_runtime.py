@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from copy import deepcopy
 from pathlib import Path
@@ -491,11 +492,87 @@ def import_global_lark_profile(expected_app_id: str, target_profile: str) -> dic
     }
 
 
+def file_keychain_material_present() -> bool:
+    """True when the skill-owned home holds file-based keychain material."""
+    root = lark_cli_home_dir() / ".local" / "share" / "lark-cli"
+    if not root.is_dir():
+        return False
+    try:
+        return any(
+            path.is_file() and (path.name == "master.key" or path.suffix == ".enc")
+            for path in root.iterdir()
+        )
+    except OSError:
+        return False
+
+
 def should_override_isolated_home(
     *, uses_keychain: bool, config_unreadable: bool
 ) -> bool:
-    """Override HOME only when the isolated profile is known not to use keychain."""
+    """Point the CLI HOME at the skill directory when its secrets live there.
+
+    macOS Keychain stays on the real user HOME. A file-based keychain written
+    under the isolated home has to keep that HOME, or later logins cannot read
+    the secret they just stored. The parent process HOME is unchanged, so the
+    global-config fingerprint still watches the user's real ~/.lark-cli.
+    """
+    if file_keychain_material_present():
+        return True
     return not uses_keychain and not config_unreadable
+
+
+def global_config_is_skill_owned() -> bool:
+    """True when Path.home() is already the skill-owned lark-cli directory."""
+    path = global_lark_config_path()
+    try:
+        path.relative_to(lark_cli_home_dir())
+    except ValueError:
+        return False
+    return True
+
+
+def isolated_cli_environment() -> dict[str, str]:
+    """Force CLI config and HOME into the skill directory for app creation."""
+    environment = lark_cli_environment()
+    home = str(lark_cli_home_dir())
+    environment["HOME"] = home
+    environment["USERPROFILE"] = home
+    environment["LARKSUITE_CLI_CONFIG_DIR"] = str(lark_cli_config_dir())
+    return environment
+
+
+def isolated_lark_apps() -> list[dict[str, str]]:
+    """Return app id and profile name from the skill-owned CLI config."""
+    path = lark_cli_config_dir() / "config.json"
+    if not path.is_file():
+        return []
+    apps = _read_lark_config(path).get("apps")
+    if not isinstance(apps, list):
+        return []
+    visible: list[dict[str, str]] = []
+    for app in apps:
+        if not isinstance(app, dict):
+            continue
+        app_id = str(app.get("appId") or app.get("app_id") or "").strip()
+        name = str(app.get("name") or "").strip()
+        if app_id:
+            visible.append({"app_id": app_id, "name": name})
+    return visible
+
+
+def parse_feishu_app_init_output(text: str) -> dict[str, str | bool]:
+    """Pull the setup URL and App ID out of `config init --new` output."""
+    url_match = re.search(
+        r"https://(?:open\.feishu\.cn|accounts\.feishu\.cn|open\.larksuite\.com)/\S+",
+        text,
+    )
+    app_match = re.search(r"\bApp ID:\s*(cli_[A-Za-z0-9]+)\b", text)
+    url = url_match.group(0).rstrip(").,]}>\"'") if url_match else ""
+    return {
+        "verification_url": url,
+        "app_id": app_match.group(1) if app_match else "",
+        "succeeded": "应用配置成功" in text or "configuration succeeded" in text.casefold(),
+    }
 
 
 def lark_cli_environment() -> dict[str, str]:

@@ -1,7 +1,8 @@
 # Guided Feishu setup and sync
 
-Ask before article fetching whether this task needs Feishu writing and which
-exact Base/table to use. Ask management access only when creating a new Base.
+Do not ask about Feishu before the article has been read. After scoring, follow
+`review.after_scoring` from `manage status`. Ask management access only when
+creating a new Base.
 Configure a target only after those choices; never request WeChat credentials,
 Base tokens, App secrets, or manually supplied Open IDs in chat.
 
@@ -26,18 +27,30 @@ codes, or resource tokens. It may return an openable Base document URL after
 create, check, or a successful write.
 
 `manage feishu-auth start` actually runs isolated `auth login --no-wait`, stores
-the device code locally, and returns `verification_url`. Resume that URL if
-authorization is already `waiting`. After the user authorizes, `feishu-auth
-complete` finishes with the stored device code. Do not tell the user to run a
-raw `lark auth login` command.
+the device code locally, and returns `verification_url` plus `qr_code_path`.
+Show the URL first, then the PNG at `qr_code_path`. Do not run `lark-cli auth
+qrcode` yourself. Resume that URL if authorization is already `waiting`. The
+link expires after `expires_in` seconds. If the user says it expired, run
+`feishu-auth expire --yes` and then `feishu-auth start`. After the user
+authorizes, `feishu-auth complete` finishes with the stored device code. Do not
+tell the user to run a raw `lark auth login` command.
+
+`manage feishu-app-init` creates the first Feishu app inside the skill-owned
+CLI config. Preview first, then `--yes`, then `status` after the user finishes
+the browser step. Do not run `lark-cli config init --new` yourself. If an app
+is already present, select it with `feishu-app --app-id` instead of creating
+another one. The first `feishu-app` selection keeps a table that was bound
+earlier. Switching from one saved App ID to a different one clears the table
+and returns `target_cleared: true`; bind the table again before writing.
 
 First-time standalone create path:
 
 ```text
 manage feishu-destination --mode create
 manage feishu-identity --as user
-manage feishu-app --app-id <APP_ID>
-manage feishu-local-profile import --yes
+manage feishu-app-init
+manage feishu-app-init --yes
+manage feishu-app-init status
 manage feishu-auth start
 manage feishu-auth complete
 manage feishu-manager-access --mode approve --base-name <BASE_NAME> --table-name <TABLE_NAME>
@@ -96,20 +109,22 @@ resolvable title and URL fields. Never create missing fields silently.
 Every write is explicit:
 
 ```text
-process done --link <WECHAT_URL> --dims-file <SCORES.json> --feishu
-process sync-feishu --link <WECHAT_URL>
+process --format json done --link <WECHAT_URL> --dims-file <SCORES.json> --feishu
+process --format json done --link <WECHAT_URL> --feishu
 process sync-feishu --all --dry-run
 ```
 
-The `--all` form is preview-only. Actual retries use `--link` one article at a
+`done --feishu --link` is the write command for a pending review and for an
+already processed review. `sync-feishu --link` calls that same path. The
+`--all` form is preview-only. Actual retries use `--link` one article at a
 time; a non-dry-run bulk request is rejected.
 
-Use `done --feishu` while the review is pending. Use `sync-feishu --link` when a
-processed review was previously kept local, skipped by the threshold, or left in
-the retry outbox. `--force-feishu` applies only to one explicitly confirmed
-article. Failed writes remain in the local outbox. URL-based upsert prevents
+`--force-feishu` applies only to one explicitly confirmed below-threshold
+article, or to an explicit rewrite of one already synced article. A failed
+write left at `sync_status=pending` can be retried with `done --feishu --link`
+without asking for `--force-feishu` again. URL-based upsert prevents
 duplicates; a retry does not mark an entry synced until the target confirms
-success.
+success. The JSON result carries `document_url` when the write succeeds.
 
 The runtime exposes only `process` and `manage`. Raw lark data commands and a
 standalone resource-grant command are intentionally unavailable; Base creation

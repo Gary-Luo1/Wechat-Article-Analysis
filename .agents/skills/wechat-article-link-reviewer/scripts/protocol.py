@@ -14,6 +14,7 @@ NEXT_ACTIONS = {
     "ARTICLE_CONTENT_INVALID": "open_article_in_wechat",
     "ARTICLE_RESPONSE_TOO_LARGE": "open_article_in_wechat",
     "ARTICLE_READ_REQUIRED": "read_article_before_completion",
+    "ARTICLE_CACHE_MISSING": "evaluate_article",
     "ARTICLE_NOT_FOUND": "show_article_inbox",
     "INVALID_ARGUMENT": "inspect_command_help",
     "LARK_MISSING_CLI": "install_compatible_lark_cli",
