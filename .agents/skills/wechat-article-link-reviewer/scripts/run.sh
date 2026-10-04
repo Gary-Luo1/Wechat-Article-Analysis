@@ -30,7 +30,7 @@ for candidate in "${CANDIDATES[@]}"; do
 done
 
 if [[ -z "$PYTHON_BIN" ]]; then
-  echo "Python 3.10+ with curl_cffi, requests, and beautifulsoup4 is required; run the installer or set WECHAT_ARTICLE_PYTHON" >&2
+  echo "Python 3.10+ with curl_cffi, requests, and beautifulsoup4 is required; install requirements.txt into the state venv or set WECHAT_ARTICLE_PYTHON" >&2
   echo "To build the isolated runtime manually:" >&2
   echo "  python3.12 -m venv \"$STATE_HOME/venv\"" >&2
   echo "  \"$STATE_HOME/venv/bin/pip\" install -r \"$SCRIPT_DIR/../requirements.txt\"" >&2

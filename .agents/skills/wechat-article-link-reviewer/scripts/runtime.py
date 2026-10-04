@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         interpreter = Path(sys.executable)
     else:
         print(
-            "Python dependencies are unavailable; run the repository installer first",
+            "Python dependencies are unavailable; install requirements.txt into the state venv or set WECHAT_ARTICLE_PYTHON",
             file=sys.stderr,
         )
         return 1

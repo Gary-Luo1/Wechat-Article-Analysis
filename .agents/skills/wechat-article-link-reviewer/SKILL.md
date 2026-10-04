@@ -84,7 +84,7 @@ editing `config.json`. `settings set --rubric technical|content_ops` selects
 the score dimensions. `technical` is the default. `content_ops` fits 公众号
 运营、案例和合规文章，避免用「技术深度」把它们压到阈值下面。
 
-For installation, Python requirements, and wrapper selection, read
+For the runtime, Python requirements, and wrapper selection, read
 [references/setup.md](references/setup.md).
 
 ## Commands

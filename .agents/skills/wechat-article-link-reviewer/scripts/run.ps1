@@ -50,4 +50,4 @@ foreach ($candidate in $candidates) {
     exit $LASTEXITCODE
 }
 
-throw "Python 3.10+ with curl_cffi, requests, and beautifulsoup4 is required; run the installer or set WECHAT_ARTICLE_PYTHON"
+throw "Python 3.10+ with curl_cffi, requests, and beautifulsoup4 is required; install requirements.txt into the state venv or set WECHAT_ARTICLE_PYTHON"
